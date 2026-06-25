@@ -7,7 +7,7 @@ const CHAT_IMAGE_BUCKET = "chat-images";
 const PROFILE_CACHE_KEY = "bible-checkin-profile-cache-v1";
 const CHECKIN_CACHE_KEY = "bible-checkin-checkin-cache-v1";
 const CHAT_CACHE_KEY = "bible-checkin-chat-cache-v1";
-const MIN_LOADING_MS = 3000;
+const MIN_LOADING_MS = 5000;
 
 const app = document.querySelector("#app");
 const supabaseClient = window.supabase?.createClient(
@@ -264,7 +264,7 @@ function renderLoading() {
   stopLoadingCountdown();
   app.innerHTML = html`
     <section class="loading-screen" style="background-image: url('${escapeAttr(LOADING_SCENE.image)}')">
-      <div class="loading-countdown"><span id="loadingCountdown">3</span>s</div>
+      <div class="loading-countdown"><span id="loadingCountdown">5</span>s</div>
       <div class="loading-overlay">
         ${icon("loading-icon")}
         <p>${escapeHtml(LOADING_SCENE.verse)}</p>
