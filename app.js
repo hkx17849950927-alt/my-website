@@ -6,7 +6,6 @@ const SUPER_ADMIN_ACCOUNT = "20010927";
 const CHAT_IMAGE_BUCKET = "chat-images";
 
 const app = document.querySelector("#app");
-app.innerHTML = `<section class="screen auth"><p class="subtitle">正在连接数据库...</p></section>`;
 const supabaseClient = window.supabase?.createClient(
   window.SUPABASE_URL || "",
   window.SUPABASE_ANON_KEY || window.SUPABASE_KEY || ""
@@ -20,6 +19,8 @@ let chatChannel = null;
 let profileCache = new Map();
 let chatPollTimer = null;
 let lastChatCreatedAt = null;
+let authRetryTimer = null;
+let reminderLoopsStarted = false;
 
 const VERSES = [
   { text: "耶和华是我的牧者，我必不至缺乏。", ref: "诗篇 23:1" },
@@ -35,6 +36,15 @@ const VERSES = [
 ];
 
 const OPENING_VERSE = pickOpeningVerse();
+const LOADING_SCENES = [
+  { image: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=900&q=80", verse: "你们要休息，要知道我是神。", ref: "诗篇 46:10" },
+  { image: "https://images.unsplash.com/photo-1441974231531-c6227db76b6e?auto=format&fit=crop&w=900&q=80", verse: "耶和华是我的亮光，是我的拯救。", ref: "诗篇 27:1" },
+  { image: "https://images.unsplash.com/photo-1501785888041-af3ef285b470?auto=format&fit=crop&w=900&q=80", verse: "疲乏的，他赐能力；软弱的，他加力量。", ref: "以赛亚书 40:29" },
+  { image: "https://images.unsplash.com/photo-1470252649378-9c29740c9fa8?auto=format&fit=crop&w=900&q=80", verse: "早晨，我必向你陈明我的心意，并要警醒。", ref: "诗篇 5:3" },
+  { image: "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=900&q=80", verse: "你要专心仰赖耶和华，不可倚靠自己的聪明。", ref: "箴言 3:5" },
+  { image: "https://images.unsplash.com/photo-1493246507139-91e8fad9978e?auto=format&fit=crop&w=900&q=80", verse: "我的帮助从造天地的耶和华而来。", ref: "诗篇 121:2" }
+];
+const LOADING_SCENE = pickLoadingScene();
 
 function requireSupabase() {
   return Boolean(supabaseClient && window.SUPABASE_URL && (window.SUPABASE_ANON_KEY || window.SUPABASE_KEY));
@@ -154,12 +164,22 @@ function withTimeout(promise, timeoutMs, fallback) {
   ]);
 }
 
+function hasStoredAuthSession() {
+  try {
+    return Object.keys(localStorage).some((key) => key.startsWith("sb-") && key.endsWith("-auth-token"));
+  } catch {
+    return false;
+  }
+}
+
 async function loadCurrentProfile() {
-  const { data: sessionData } = await withTimeout(
+  const result = await withTimeout(
     supabaseClient.auth.getSession(),
-    5000,
-    { data: { session: null } }
+    12000,
+    { timedOut: true, data: { session: null } }
   );
+  if (result.timedOut && hasStoredAuthSession()) return "pending";
+  const sessionData = result.data;
   currentSession = sessionData.session;
   if (!currentSession?.user) {
     currentUser = null;
@@ -169,27 +189,74 @@ async function loadCurrentProfile() {
   return currentUser;
 }
 
-async function init() {
-  if (!requireSupabase()) {
-    renderError("Supabase 还没有配置好，请检查 supabase-config.js。");
-    return;
-  }
+function renderLoading() {
+  currentView = "loading";
+  closeChatRealtime();
+  app.innerHTML = html`
+    <section class="loading-screen" style="background-image: url('${escapeAttr(LOADING_SCENE.image)}')">
+      <div class="loading-overlay">
+        ${icon("loading-icon")}
+        <p>${escapeHtml(LOADING_SCENE.verse)}</p>
+        <strong>${escapeHtml(LOADING_SCENE.ref)}</strong>
+      </div>
+    </section>
+  `;
+}
 
-  supabaseClient.auth.onAuthStateChange(async () => {
-    await loadCurrentProfile();
+function scheduleAuthRetry() {
+  clearTimeout(authRetryTimer);
+  authRetryTimer = setTimeout(async () => {
+    const profile = await loadCurrentProfile();
+    if (profile === "pending") {
+      renderLoading();
+      scheduleAuthRetry();
+      return;
+    }
     await render();
-  });
+    startReminderLoops();
+  }, 1200);
+}
 
-  await loadCurrentProfile();
-  await render();
-  await checkDailyReminder();
+function startReminderLoops() {
+  if (reminderLoopsStarted) return;
+  reminderLoopsStarted = true;
+  checkDailyReminder();
   setInterval(checkDailyReminder, 60 * 1000);
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) checkDailyReminder();
   });
 }
 
+async function init() {
+  if (!requireSupabase()) {
+    renderError("Supabase 还没有配置好，请检查 supabase-config.js。");
+    return;
+  }
+
+  renderLoading();
+
+  supabaseClient.auth.onAuthStateChange(async () => {
+    const profile = await loadCurrentProfile();
+    if (profile === "pending") {
+      renderLoading();
+      scheduleAuthRetry();
+      return;
+    }
+    await render();
+  });
+
+  const profile = await loadCurrentProfile();
+  if (profile === "pending") {
+    renderLoading();
+    scheduleAuthRetry();
+    return;
+  }
+  await render();
+  startReminderLoops();
+}
+
 async function render() {
+  clearTimeout(authRetryTimer);
   closeChatRealtime();
   if (!currentUser) return renderAuth();
   return renderHome(currentUser);
@@ -224,6 +291,15 @@ function pickOpeningVerse() {
     return VERSES[seed[0] % VERSES.length];
   }
   return VERSES[Math.floor(Math.random() * VERSES.length)];
+}
+
+function pickLoadingScene() {
+  const seed = new Uint32Array(1);
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(seed);
+    return LOADING_SCENES[seed[0] % LOADING_SCENES.length];
+  }
+  return LOADING_SCENES[Math.floor(Math.random() * LOADING_SCENES.length)];
 }
 
 function renderAuth() {
@@ -550,6 +626,7 @@ async function renderChat() {
   document.querySelector("#chatForm").addEventListener("submit", sendChatMessage);
   document.querySelector("#chatInput").focus();
   bindImageLoadButtons();
+  bindChatImagePreview();
   scrollChatBottom();
   openChatRealtime();
   startChatPolling();
@@ -561,7 +638,7 @@ function chatMessageHtml(message, sender, isMine) {
       <div class="chat-meta">${escapeHtml(sender?.display_name || "未知成员")}</div>
       <div class="chat-bubble">
         ${message.type === "image" && message.image_data ? `
-          <img class="chat-image" src="${escapeAttr(message.image_data || "")}" alt="${escapeAttr(message.image_name || "聊天图片")}">
+          <img class="chat-image" src="${escapeAttr(message.image_data || "")}" alt="${escapeAttr(message.image_name || "聊天图片")}" data-full-image="${escapeAttr(message.image_data || "")}">
           ${message.text ? `<span class="chat-caption">${escapeHtml(message.text)}</span>` : ""}
         ` : message.type === "image" ? `
           <button class="image-placeholder" type="button" data-image-id="${escapeAttr(message.id)}">查看图片</button>
@@ -608,6 +685,7 @@ async function appendLiveMessage(message) {
   if (!list) return;
   list.insertAdjacentHTML("beforeend", chatMessageHtml(message, sender, message.user_id === currentUser.id));
   bindImageLoadButtons();
+  bindChatImagePreview();
   if (!lastChatCreatedAt || message.created_at > lastChatCreatedAt) {
     lastChatCreatedAt = message.created_at;
   }
@@ -666,7 +744,34 @@ async function loadChatImage(button) {
   image.className = "chat-image";
   image.src = data.image_data;
   image.alt = data.image_name || "聊天图片";
+  image.dataset.fullImage = data.image_data;
   button.replaceWith(image);
+  bindChatImagePreview();
+}
+
+function bindChatImagePreview() {
+  document.querySelectorAll(".chat-image").forEach((image) => {
+    if (image.dataset.previewBound === "1") return;
+    image.dataset.previewBound = "1";
+    image.addEventListener("click", () => openImagePreview(image.dataset.fullImage || image.src, image.alt));
+  });
+}
+
+function openImagePreview(src, alt = "聊天图片") {
+  if (!src) return;
+  document.querySelector(".image-preview")?.remove();
+  const preview = document.createElement("div");
+  preview.className = "image-preview";
+  preview.innerHTML = `
+    <button class="image-preview-close" type="button">关闭</button>
+    <img src="${escapeAttr(src)}" alt="${escapeAttr(alt)}">
+  `;
+  document.body.appendChild(preview);
+  preview.addEventListener("click", (event) => {
+    if (event.target === preview || event.target.closest(".image-preview-close")) {
+      preview.remove();
+    }
+  });
 }
 
 function scrollChatBottom() {
