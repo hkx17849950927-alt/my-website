@@ -7,6 +7,7 @@ const CHAT_IMAGE_BUCKET = "chat-images";
 const PROFILE_CACHE_KEY = "bible-checkin-profile-cache-v1";
 const CHECKIN_CACHE_KEY = "bible-checkin-checkin-cache-v1";
 const CHAT_CACHE_KEY = "bible-checkin-chat-cache-v1";
+const MIN_LOADING_MS = 3000;
 
 const app = document.querySelector("#app");
 const supabaseClient = window.supabase?.createClient(
@@ -24,6 +25,8 @@ let chatPollTimer = null;
 let lastChatCreatedAt = null;
 let authRetryTimer = null;
 let reminderLoopsStarted = false;
+let startupGateOpen = false;
+let loadingCountdownTimer = null;
 
 const VERSES = [
   { text: "耶和华是我的牧者，我必不至缺乏。", ref: "诗篇 23:1" },
@@ -40,10 +43,10 @@ const VERSES = [
 
 const OPENING_VERSE = pickOpeningVerse();
 const LOADING_SCENES = [
-  { image: "./assets/loading-1.png", verse: "你们要休息，要知道我是神。", ref: "诗篇 46:10" },
-  { image: "./assets/loading-2.png", verse: "耶和华是我的亮光，是我的拯救。", ref: "诗篇 27:1" },
-  { image: "./assets/loading-3.png", verse: "疲乏的，他赐能力；软弱的，他加力量。", ref: "以赛亚书 40:29" },
-  { image: "./assets/loading-4.png", verse: "我的帮助从造天地的耶和华而来。", ref: "诗篇 121:2" }
+  { image: "./assets/loading-1.jpg", verse: "你们要休息，要知道我是神。", ref: "诗篇 46:10" },
+  { image: "./assets/loading-2.jpg", verse: "耶和华是我的亮光，是我的拯救。", ref: "诗篇 27:1" },
+  { image: "./assets/loading-3.jpg", verse: "疲乏的，他赐能力；软弱的，他加力量。", ref: "以赛亚书 40:29" },
+  { image: "./assets/loading-4.jpg", verse: "我的帮助从造天地的耶和华而来。", ref: "诗篇 121:2" }
 ];
 const LOADING_SCENE = pickLoadingScene();
 
@@ -219,6 +222,16 @@ function withTimeout(promise, timeoutMs, fallback) {
   ]);
 }
 
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function stopLoadingCountdown() {
+  if (!loadingCountdownTimer) return;
+  clearInterval(loadingCountdownTimer);
+  loadingCountdownTimer = null;
+}
+
 function hasStoredAuthSession() {
   try {
     return Object.keys(localStorage).some((key) => key.startsWith("sb-") && key.endsWith("-auth-token"));
@@ -248,8 +261,10 @@ async function loadCurrentProfile() {
 function renderLoading() {
   currentView = "loading";
   closeChatRealtime();
+  stopLoadingCountdown();
   app.innerHTML = html`
     <section class="loading-screen" style="background-image: url('${escapeAttr(LOADING_SCENE.image)}')">
+      <div class="loading-countdown"><span id="loadingCountdown">3</span>s</div>
       <div class="loading-overlay">
         ${icon("loading-icon")}
         <p>${escapeHtml(LOADING_SCENE.verse)}</p>
@@ -257,6 +272,13 @@ function renderLoading() {
       </div>
     </section>
   `;
+  const startedAt = Date.now();
+  loadingCountdownTimer = setInterval(() => {
+    const remaining = Math.max(0, Math.ceil((MIN_LOADING_MS - (Date.now() - startedAt)) / 1000));
+    const node = document.querySelector("#loadingCountdown");
+    if (node) node.textContent = String(remaining);
+    if (remaining <= 0) stopLoadingCountdown();
+  }, 150);
 }
 
 function scheduleAuthRetry() {
@@ -289,16 +311,15 @@ async function init() {
     return;
   }
 
+  renderLoading();
   const cachedProfile = getCachedProfile();
   if (cachedProfile && hasStoredAuthSession()) {
     currentUser = cachedProfile;
-    renderHome(currentUser);
-  } else {
-    renderLoading();
   }
 
   supabaseClient.auth.onAuthStateChange(async () => {
     const profile = await loadCurrentProfile();
+    if (!startupGateOpen) return;
     if (profile === "pending") {
       if (!currentUser) renderLoading();
       scheduleAuthRetry();
@@ -307,10 +328,16 @@ async function init() {
     await render();
   });
 
-  const profile = await loadCurrentProfile();
+  const [profile] = await Promise.all([
+    loadCurrentProfile(),
+    wait(MIN_LOADING_MS)
+  ]);
+  startupGateOpen = true;
   if (profile === "pending") {
-    if (!currentUser) renderLoading();
+    if (currentUser) renderHome(currentUser);
+    else renderLoading();
     scheduleAuthRetry();
+    if (currentUser) startReminderLoops();
     return;
   }
   await render();
@@ -319,6 +346,7 @@ async function init() {
 
 async function render() {
   clearTimeout(authRetryTimer);
+  stopLoadingCountdown();
   closeChatRealtime();
   if (!currentUser) return renderAuth();
   return renderHome(currentUser);
