@@ -1,12 +1,21 @@
-const STORAGE_KEY = "bible-checkin-web-db-v2";
-const SESSION_KEY = "bible-checkin-web-session-v2";
 const REMINDER_KEY = "bible-checkin-reminded-v1";
 const BEIJING_TZ = "Asia/Shanghai";
 const REMINDER_HOUR = 21;
 const REMINDER_MINUTE = 30;
+const SUPER_ADMIN_ACCOUNT = "20010927";
 
 const app = document.querySelector("#app");
+app.innerHTML = `<section class="screen auth"><p class="subtitle">正在连接数据库...</p></section>`;
+const supabaseClient = window.supabase?.createClient(
+  window.SUPABASE_URL || "",
+  window.SUPABASE_ANON_KEY || window.SUPABASE_KEY || ""
+);
+
 let monthIndex = 0;
+let currentSession = null;
+let currentUser = null;
+let currentView = "home";
+let chatChannel = null;
 
 const VERSES = [
   { text: "耶和华是我的牧者，我必不至缺乏。", ref: "诗篇 23:1" },
@@ -23,38 +32,12 @@ const VERSES = [
 
 const OPENING_VERSE = pickOpeningVerse();
 
-function defaultDb() {
-  return {
-    nextUserId: 1,
-    nextMemberId: 1,
-    nextCheckinId: 1,
-    nextMessageId: 1,
-    users: [],
-    groupMembers: [],
-    checkinRecords: [],
-    chatMessages: []
-  };
+function requireSupabase() {
+  return Boolean(supabaseClient && window.SUPABASE_URL && (window.SUPABASE_ANON_KEY || window.SUPABASE_KEY));
 }
 
-function loadDb() {
-  try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY)) || defaultDb();
-  } catch {
-    return defaultDb();
-  }
-}
-
-function saveDb(db) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
-}
-
-function getSession() {
-  return Number(localStorage.getItem(SESSION_KEY) || 0);
-}
-
-function setSession(userId) {
-  if (userId) localStorage.setItem(SESSION_KEY, String(userId));
-  else localStorage.removeItem(SESSION_KEY);
+function accountEmail(account) {
+  return `${account}@bible-checkin.local`;
 }
 
 function normalizeAccount(value) {
@@ -103,46 +86,8 @@ function beijingClockParts() {
   };
 }
 
-function nowIso() {
-  return new Date().toISOString();
-}
-
-async function sha256(text) {
-  if (!globalThis.crypto?.subtle) return simpleHash(text);
-  const bytes = new TextEncoder().encode(text);
-  const hash = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(hash)).map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-function simpleHash(text) {
-  let h1 = 0xdeadbeef;
-  let h2 = 0x41c6ce57;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text.charCodeAt(i);
-    h1 = Math.imul(h1 ^ ch, 2654435761);
-    h2 = Math.imul(h2 ^ ch, 1597334677);
-  }
-  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-  return `fallback:${(h2 >>> 0).toString(16).padStart(8, "0")}${(h1 >>> 0).toString(16).padStart(8, "0")}`;
-}
-
-function byId(db, userId) {
-  return db.users.find((u) => u.id === userId);
-}
-
 function isSuperAdmin(user) {
-  return user?.account === "20010927";
-}
-
-function availableMonths(db) {
-  const current = beijingParts().month;
-  const months = [...new Set([current, ...db.checkinRecords.map((r) => r.month)])];
-  return months.sort().reverse();
-}
-
-function hasCheckedOnDate(db, userId, date) {
-  return db.checkinRecords.some((r) => r.userId === userId && r.checkinDate === date);
+  return user?.account === SUPER_ADMIN_ACCOUNT;
 }
 
 function isAfterReminderTime(clock) {
@@ -160,19 +105,6 @@ function notifyUser(title, body) {
   toast(body);
 }
 
-function checkDailyReminder() {
-  const db = loadDb();
-  const user = byId(db, getSession());
-  if (!user) return;
-  const clock = beijingClockParts();
-  if (!isAfterReminderTime(clock)) return;
-  if (hasCheckedOnDate(db, user.id, clock.date)) return;
-  const key = userReminderKey(user.id, clock.date);
-  if (localStorage.getItem(key)) return;
-  localStorage.setItem(key, "1");
-  notifyUser("读经打卡提醒", "现在已经过了晚上 9:30，今天还没有打卡。");
-}
-
 async function requestNotificationAccess() {
   if (!("Notification" in window)) return toast("当前浏览器不支持系统通知");
   if (Notification.permission === "granted") return toast("系统提醒已开启");
@@ -183,29 +115,94 @@ async function requestNotificationAccess() {
 function isMentionForUser(text, user) {
   const value = String(text || "");
   return value.includes("@所有人")
-    || value.includes(`@${user.displayName}`)
+    || value.includes(`@${user.display_name}`)
     || value.includes(`@${user.account}`);
 }
 
-function shouldNotifyChatMessage(message, currentUser) {
-  if (!currentUser || message.userId === currentUser.id) return false;
-  if (!currentUser.chatMuted) return true;
-  return isMentionForUser(message.text, currentUser);
+function shouldNotifyChatMessage(message, currentProfile) {
+  if (!currentProfile || message.user_id === currentProfile.id) return false;
+  if (!currentProfile.chat_muted) return true;
+  return isMentionForUser(message.text, currentProfile);
 }
 
-function notifyChatMessage(message, sender, currentUser) {
+async function notifyChatMessage(message) {
   if (!shouldNotifyChatMessage(message, currentUser)) return;
+  const sender = await getProfile(message.user_id);
   const body = message.type === "image"
-    ? `${sender?.displayName || "成员"} 发来了一张图片`
-    : `${sender?.displayName || "成员"}：${message.text}`;
+    ? `${sender?.display_name || "成员"} 发来了一张图片`
+    : `${sender?.display_name || "成员"}：${message.text}`;
   notifyUser("马拉松群聊", body);
 }
 
-function render() {
-  const db = loadDb();
-  const user = byId(db, getSession());
-  if (!user) return renderAuth();
-  return renderHome(user, db);
+async function getProfile(userId) {
+  const { data } = await supabaseClient
+    .from("profiles")
+    .select("*")
+    .eq("id", userId)
+    .maybeSingle();
+  return data || null;
+}
+
+function withTimeout(promise, timeoutMs, fallback) {
+  return Promise.race([
+    promise,
+    new Promise((resolve) => setTimeout(() => resolve(fallback), timeoutMs))
+  ]);
+}
+
+async function loadCurrentProfile() {
+  const { data: sessionData } = await withTimeout(
+    supabaseClient.auth.getSession(),
+    5000,
+    { data: { session: null } }
+  );
+  currentSession = sessionData.session;
+  if (!currentSession?.user) {
+    currentUser = null;
+    return null;
+  }
+  currentUser = await getProfile(currentSession.user.id);
+  return currentUser;
+}
+
+async function init() {
+  if (!requireSupabase()) {
+    renderError("Supabase 还没有配置好，请检查 supabase-config.js。");
+    return;
+  }
+
+  supabaseClient.auth.onAuthStateChange(async () => {
+    await loadCurrentProfile();
+    await render();
+  });
+
+  await loadCurrentProfile();
+  await render();
+  await checkDailyReminder();
+  setInterval(checkDailyReminder, 60 * 1000);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) checkDailyReminder();
+  });
+}
+
+async function render() {
+  closeChatRealtime();
+  if (!currentUser) return renderAuth();
+  return renderHome(currentUser);
+}
+
+function renderError(message) {
+  app.innerHTML = html`
+    <section class="screen auth">
+      <div class="brand">
+        ${icon()}
+        <div>
+          <h1>读经打卡</h1>
+          <p class="subtitle">${escapeHtml(message)}</p>
+        </div>
+      </div>
+    </section>
+  `;
 }
 
 function html(strings, ...values) {
@@ -226,13 +223,14 @@ function pickOpeningVerse() {
 }
 
 function renderAuth() {
+  currentView = "auth";
   app.innerHTML = html`
     <section class="screen auth">
       <div class="brand">
         ${icon()}
         <div>
           <h1>读经打卡</h1>
-          <p class="subtitle">使用 8 位数字账号和密码登录。没有账号时，输入新账号和密码即可直接注册。</p>
+          <p class="subtitle">使用 8 位数字账号和密码登录。没有账号时，输入新账号和密码即可注册。</p>
         </div>
       </div>
       <label class="field">
@@ -264,49 +262,70 @@ async function loginOrRegister() {
   if (!isValidAccount(account)) return toast("账号必须是 8 位数字");
   if (password.length < 6) return toast("密码至少 6 位");
 
-  const db = loadDb();
-  const existing = db.users.find((u) => u.account === account);
-  const passwordHash = await sha256(`${account}:${password}`);
+  setBusy("#login", true, "请稍候");
+  const email = accountEmail(account);
+  const loginResult = await supabaseClient.auth.signInWithPassword({ email, password });
 
-  if (existing) {
-    if (existing.passwordHash !== passwordHash) return toast("密码不正确");
-    existing.lastLoginAt = nowIso();
-    saveDb(db);
-    setSession(existing.id);
+  if (!loginResult.error) {
+    await loadCurrentProfile();
     toast("登录成功");
-    render();
+    await render();
     return;
   }
 
-  const user = {
-    id: db.nextUserId++,
-    account,
-    passwordHash,
-    displayName: cleanName(displayName, `成员${account.slice(-4)}`),
-    createdAt: nowIso(),
-    lastLoginAt: nowIso()
-  };
-  db.users.push(user);
-  db.groupMembers.push({
-    id: db.nextMemberId++,
-    userId: user.id,
-    role: db.groupMembers.length === 0 ? "admin" : "member",
-    joinedAt: nowIso()
+  const registerResult = await supabaseClient.auth.signUp({
+    email,
+    password,
+    options: {
+      data: {
+        account,
+        display_name: cleanName(displayName, `成员${account.slice(-4)}`)
+      }
+    }
   });
-  saveDb(db);
-  setSession(user.id);
+
+  if (registerResult.error) {
+    setBusy("#login", false, "登录 / 注册");
+    return toast(friendlyAuthError(registerResult.error.message));
+  }
+
+  const userId = registerResult.data.user?.id;
+  if (!userId) {
+    setBusy("#login", false, "登录 / 注册");
+    return toast("注册失败，请确认邮箱验证已经关闭");
+  }
+
+  const profile = {
+    id: userId,
+    account,
+    display_name: cleanName(displayName, `成员${account.slice(-4)}`)
+  };
+  const { error: profileError } = await supabaseClient.from("profiles").insert(profile);
+  if (profileError && profileError.code !== "23505") {
+    setBusy("#login", false, "登录 / 注册");
+    return toast(`资料创建失败：${profileError.message}`);
+  }
+
+  await loadCurrentProfile();
   toast("注册并登录成功");
-  render();
+  await render();
 }
 
-function renderHome(user, db) {
+function friendlyAuthError(message) {
+  if (/invalid login credentials/i.test(message)) return "账号或密码不正确";
+  if (/already registered|already exists/i.test(message)) return "账号已存在，请检查密码";
+  return message || "操作失败";
+}
+
+async function renderHome(user) {
+  currentView = "home";
   const { date } = beijingParts();
-  const checked = hasCheckedOnDate(db, user.id, date);
+  const checked = await hasCheckedOnDate(user.id, date);
   app.innerHTML = html`
     <section class="screen">
       <header class="home-head">
         ${icon("mini-icon")}
-        <h1 class="top-title">平安，${escapeHtml(user.displayName)}</h1>
+        <h1 class="top-title">平安，${escapeHtml(user.display_name)}</h1>
         <button class="text-button" id="mine">我的</button>
       </header>
       <p class="subtitle scripture">
@@ -328,39 +347,70 @@ function renderHome(user, db) {
   document.querySelector("#checkin").addEventListener("click", () => checkin(user.id));
 }
 
-function checkin(userId) {
-  const db = loadDb();
-  const { date, month } = beijingParts();
-  const exists = db.checkinRecords.some((r) => r.userId === userId && r.checkinDate === date);
-  if (exists) {
-    toast("今天已经打过卡了");
-    render();
-    return;
-  }
-  db.checkinRecords.push({
-    id: db.nextCheckinId++,
-    userId,
-    checkinDate: date,
-    month,
-    createdAt: nowIso()
-  });
-  saveDb(db);
-  toast("今日已打卡");
-  render();
+async function hasCheckedOnDate(userId, date) {
+  const { data, error } = await supabaseClient
+    .from("checkin_records")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("checkin_date", date)
+    .maybeSingle();
+  if (error) return false;
+  return Boolean(data);
 }
 
-function renderRanking() {
-  const db = loadDb();
-  const months = availableMonths(db);
+async function checkin(userId) {
+  const { date, month } = beijingParts();
+  const { error } = await supabaseClient.from("checkin_records").insert({
+    user_id: userId,
+    checkin_date: date,
+    month
+  });
+
+  if (error) {
+    if (error.code === "23505") {
+      toast("今天已经打过卡了");
+      await renderHome(currentUser);
+      return;
+    }
+    return toast(`打卡失败：${error.message}`);
+  }
+  toast("今日已打卡");
+  await renderHome(currentUser);
+}
+
+async function availableMonths() {
+  const current = beijingParts().month;
+  const { data } = await supabaseClient
+    .from("checkin_records")
+    .select("month")
+    .order("month", { ascending: false });
+  const months = [...new Set([current, ...(data || []).map((row) => row.month)])];
+  return months.sort().reverse();
+}
+
+async function renderRanking() {
+  currentView = "ranking";
+  const months = await availableMonths();
   if (monthIndex < 0 || monthIndex >= months.length) monthIndex = 0;
   const month = months[monthIndex];
-  const rows = db.groupMembers
-    .map((member) => {
-      const user = byId(db, member.userId);
-      const days = db.checkinRecords.filter((r) => r.userId === member.userId && r.month === month).length;
-      return { name: user?.displayName || "未知成员", days, userId: member.userId };
-    })
-    .sort((a, b) => b.days - a.days || a.name.localeCompare(b.name, "zh-Hans-CN") || a.userId - b.userId);
+
+  const [{ data: profiles }, { data: records }] = await Promise.all([
+    supabaseClient.from("profiles").select("id, account, display_name"),
+    supabaseClient.from("checkin_records").select("user_id").eq("month", month)
+  ]);
+
+  const dayCount = new Map();
+  (records || []).forEach((record) => {
+    dayCount.set(record.user_id, (dayCount.get(record.user_id) || 0) + 1);
+  });
+
+  const rows = (profiles || [])
+    .map((profile) => ({
+      userId: profile.id,
+      name: profile.display_name || "未知成员",
+      days: dayCount.get(profile.id) || 0
+    }))
+    .sort((a, b) => b.days - a.days || a.name.localeCompare(b.name, "zh-Hans-CN"));
 
   app.innerHTML = html`
     <section class="screen">
@@ -393,22 +443,17 @@ function renderRanking() {
   });
 }
 
-function renderMembers() {
-  const db = loadDb();
-  const currentUser = byId(db, getSession());
-  if (!currentUser) return renderAuth();
+async function renderMembers() {
+  currentView = "members";
+  const { data: profiles, error } = await supabaseClient
+    .from("profiles")
+    .select("id, account, display_name, created_at")
+    .order("display_name", { ascending: true });
+
+  if (error) return toast(`成员读取失败：${error.message}`);
+
+  const rows = profiles || [];
   const canDeleteMembers = isSuperAdmin(currentUser);
-  const rows = db.groupMembers
-    .map((member) => {
-      const user = byId(db, member.userId);
-      return {
-        userId: member.userId,
-        account: user?.account || "-------",
-        name: user?.displayName || "未知成员",
-        joinedAt: member.joinedAt || ""
-      };
-    })
-    .sort((a, b) => a.name.localeCompare(b.name, "zh-Hans-CN") || a.account.localeCompare(b.account));
 
   app.innerHTML = html`
     <section class="screen">
@@ -421,11 +466,11 @@ function renderMembers() {
         ${rows.map((row) => `
           <div class="member-row">
             <div>
-              <strong>${escapeHtml(row.name)}</strong>
+              <strong>${escapeHtml(row.display_name || "未知成员")}</strong>
               <span>账号 ${escapeHtml(row.account)}</span>
             </div>
-            ${canDeleteMembers && row.userId !== currentUser.id ? `
-              <button class="member-delete" data-user-id="${row.userId}" data-name="${escapeAttr(row.name)}">删除</button>
+            ${canDeleteMembers && row.id !== currentUser.id ? `
+              <button class="member-delete" data-user-id="${escapeAttr(row.id)}" data-name="${escapeAttr(row.display_name || "该成员")}">删除</button>
             ` : ""}
           </div>
         `).join("")}
@@ -435,40 +480,37 @@ function renderMembers() {
   bindBack();
   document.querySelectorAll(".member-delete").forEach((button) => {
     button.addEventListener("click", () => {
-      const userId = Number(button.dataset.userId);
+      const userId = button.dataset.userId;
       const name = button.dataset.name || "该成员";
-      if (confirm(`确定删除 ${name} 吗？`)) {
-        deleteMember(userId);
-      }
+      if (confirm(`确定删除 ${name} 吗？`)) deleteMember(userId);
     });
   });
 }
 
-function deleteMember(userId) {
-  const db = loadDb();
-  const currentUser = byId(db, getSession());
+async function deleteMember(userId) {
   if (!isSuperAdmin(currentUser)) return toast("没有删除权限");
   if (userId === currentUser.id) return toast("不能删除当前登录账号");
-  const target = byId(db, userId);
-  if (!target) return toast("成员不存在");
-
-  db.users = db.users.filter((user) => user.id !== userId);
-  db.groupMembers = db.groupMembers.filter((member) => member.userId !== userId);
-  db.checkinRecords = db.checkinRecords.filter((record) => record.userId !== userId);
-  if (Array.isArray(db.chatMessages)) {
-    db.chatMessages = db.chatMessages.filter((message) => message.userId !== userId);
-  }
-  saveDb(db);
-  toast(`已删除：${target.displayName}`);
-  renderMembers();
+  const { error } = await supabaseClient.from("profiles").delete().eq("id", userId);
+  if (error) return toast(`删除失败：${error.message}`);
+  toast("已删除成员资料");
+  await renderMembers();
 }
 
-function renderChat() {
-  const db = loadDb();
-  const user = byId(db, getSession());
-  if (!user) return renderAuth();
-  const messages = Array.isArray(db.chatMessages) ? db.chatMessages : [];
-  const muteText = user.chatMuted ? "免打扰：开" : "免打扰：关";
+async function renderChat() {
+  currentView = "chat";
+  const [{ data: messages, error }, { data: profiles }] = await Promise.all([
+    supabaseClient
+      .from("chat_messages")
+      .select("*")
+      .order("created_at", { ascending: true })
+      .limit(200),
+    supabaseClient.from("profiles").select("id, display_name")
+  ]);
+
+  if (error) return toast(`群聊读取失败：${error.message}`);
+
+  const profileMap = new Map((profiles || []).map((profile) => [profile.id, profile]));
+  const muteText = currentUser.chat_muted ? "免打扰：开" : "免打扰：关";
 
   app.innerHTML = html`
     <section class="screen chat-screen">
@@ -478,22 +520,12 @@ function renderChat() {
         <span>@昵称、@账号、@所有人 会提醒</span>
       </div>
       <div class="chat-list" id="chatList">
-        ${messages.length === 0 ? `
+        ${(messages || []).length === 0 ? `
           <div class="empty-chat">还没有消息</div>
-        ` : messages.map((message) => {
-          const sender = byId(db, message.userId);
-          const isMine = message.userId === user.id;
-          return `
-            <div class="chat-message ${isMine ? "mine-message" : ""}">
-              <div class="chat-meta">${escapeHtml(sender?.displayName || "未知成员")}</div>
-              <div class="chat-bubble">
-                ${message.type === "image" ? `
-                  <img class="chat-image" src="${escapeAttr(message.imageData || "")}" alt="${escapeAttr(message.imageName || "聊天图片")}">
-                  ${message.text ? `<span class="chat-caption">${escapeHtml(message.text)}</span>` : ""}
-                ` : escapeHtml(message.text || "")}
-              </div>
-            </div>
-          `;
+        ` : (messages || []).map((message) => {
+          const sender = profileMap.get(message.user_id);
+          const isMine = message.user_id === currentUser.id;
+          return chatMessageHtml(message, sender, isMine);
         }).join("")}
       </div>
       <form class="chat-compose" id="chatForm">
@@ -510,38 +542,87 @@ function renderChat() {
   document.querySelector("#imageInput").addEventListener("change", sendImageMessage);
   document.querySelector("#chatForm").addEventListener("submit", sendChatMessage);
   document.querySelector("#chatInput").focus();
-  document.querySelector("#chatList").scrollTop = document.querySelector("#chatList").scrollHeight;
+  scrollChatBottom();
+  openChatRealtime();
 }
 
-function toggleChatMute() {
-  const db = loadDb();
-  const user = byId(db, getSession());
-  if (!user) return renderAuth();
-  user.chatMuted = !user.chatMuted;
-  saveDb(db);
-  toast(user.chatMuted ? "群聊免打扰已开启，@你仍会提醒" : "群聊免打扰已关闭");
-  renderChat();
+function chatMessageHtml(message, sender, isMine) {
+  return `
+    <div class="chat-message ${isMine ? "mine-message" : ""}" data-message-id="${escapeAttr(message.id)}">
+      <div class="chat-meta">${escapeHtml(sender?.display_name || "未知成员")}</div>
+      <div class="chat-bubble">
+        ${message.type === "image" ? `
+          <img class="chat-image" src="${escapeAttr(message.image_data || "")}" alt="${escapeAttr(message.image_name || "聊天图片")}">
+          ${message.text ? `<span class="chat-caption">${escapeHtml(message.text)}</span>` : ""}
+        ` : escapeHtml(message.text || "")}
+      </div>
+    </div>
+  `;
 }
 
-function sendChatMessage(event) {
+function openChatRealtime() {
+  closeChatRealtime();
+  chatChannel = supabaseClient
+    .channel("chat_messages_live")
+    .on("postgres_changes", {
+      event: "INSERT",
+      schema: "public",
+      table: "chat_messages"
+    }, async (payload) => {
+      if (currentView === "chat") {
+        await appendLiveMessage(payload.new);
+      }
+      await notifyChatMessage(payload.new);
+    })
+    .subscribe();
+}
+
+function closeChatRealtime() {
+  if (!chatChannel) return;
+  supabaseClient.removeChannel(chatChannel);
+  chatChannel = null;
+}
+
+async function appendLiveMessage(message) {
+  if (document.querySelector(`[data-message-id="${CSS.escape(message.id)}"]`)) return;
+  document.querySelector(".empty-chat")?.remove();
+  const sender = await getProfile(message.user_id);
+  const list = document.querySelector("#chatList");
+  if (!list) return;
+  list.insertAdjacentHTML("beforeend", chatMessageHtml(message, sender, message.user_id === currentUser.id));
+  scrollChatBottom();
+}
+
+function scrollChatBottom() {
+  const list = document.querySelector("#chatList");
+  if (list) list.scrollTop = list.scrollHeight;
+}
+
+async function toggleChatMute() {
+  const nextValue = !currentUser.chat_muted;
+  const { error } = await supabaseClient
+    .from("profiles")
+    .update({ chat_muted: nextValue })
+    .eq("id", currentUser.id);
+  if (error) return toast(`设置失败：${error.message}`);
+  currentUser.chat_muted = nextValue;
+  toast(nextValue ? "群聊免打扰已开启，@你仍会提醒" : "群聊免打扰已关闭");
+  await renderChat();
+}
+
+async function sendChatMessage(event) {
   event.preventDefault();
-  const db = loadDb();
-  const user = byId(db, getSession());
-  if (!user) return renderAuth();
   const input = document.querySelector("#chatInput");
   const text = input.value.trim();
   if (!text) return toast("消息不能为空");
-  if (!Array.isArray(db.chatMessages)) db.chatMessages = [];
-  if (!db.nextMessageId) db.nextMessageId = 1;
-  db.chatMessages.push({
-    id: db.nextMessageId++,
+  const { error } = await supabaseClient.from("chat_messages").insert({
     type: "text",
-    userId: user.id,
-    text,
-    createdAt: nowIso()
+    user_id: currentUser.id,
+    text
   });
-  saveDb(db);
-  renderChat();
+  if (error) return toast(`发送失败：${error.message}`);
+  input.value = "";
+  await renderChat();
 }
 
 function sendImageMessage(event) {
@@ -552,30 +633,27 @@ function sendImageMessage(event) {
   if (file.size > 2 * 1024 * 1024) return toast("图片不能超过 2MB");
 
   const reader = new FileReader();
-  reader.onload = () => {
-    const db = loadDb();
-    const user = byId(db, getSession());
-    if (!user) return renderAuth();
+  reader.onload = async () => {
     const caption = document.querySelector("#chatInput")?.value.trim() || "";
-    if (!Array.isArray(db.chatMessages)) db.chatMessages = [];
-    if (!db.nextMessageId) db.nextMessageId = 1;
-    db.chatMessages.push({
-      id: db.nextMessageId++,
+    const { error } = await supabaseClient.from("chat_messages").insert({
       type: "image",
-      userId: user.id,
+      user_id: currentUser.id,
       text: caption,
-      imageData: String(reader.result || ""),
-      imageName: file.name,
-      createdAt: nowIso()
+      image_data: String(reader.result || ""),
+      image_name: file.name
     });
-    saveDb(db);
-    renderChat();
+    if (error) return toast(`图片发送失败：${error.message}`);
+    const input = document.querySelector("#chatInput");
+    if (input) input.value = "";
+    await renderChat();
   };
   reader.onerror = () => toast("图片读取失败");
   reader.readAsDataURL(file);
 }
 
 function renderMine(user) {
+  currentView = "mine";
+  closeChatRealtime();
   app.innerHTML = html`
     <section class="screen">
       ${nav("我的")}
@@ -585,7 +663,7 @@ function renderMine(user) {
 
         <label class="field">
           <span>修改名称</span>
-          <input id="name" value="${escapeAttr(user.displayName)}">
+          <input id="name" value="${escapeAttr(user.display_name)}">
         </label>
         <button class="primary" id="saveName">保存名称</button>
 
@@ -598,23 +676,39 @@ function renderMine(user) {
   bindBack();
   document.querySelector("#saveName").addEventListener("click", saveName);
   document.querySelector("#enableNotifications").addEventListener("click", requestNotificationAccess);
-  document.querySelector("#logout").addEventListener("click", () => {
-    setSession(0);
-    toast("已退出登录");
-    render();
-  });
+  document.querySelector("#logout").addEventListener("click", logout);
 }
 
-function saveName() {
-  const db = loadDb();
-  const user = byId(db, getSession());
-  if (!user) return render();
+async function saveName() {
   const name = cleanName(document.querySelector("#name").value, "");
   if (!name) return toast("名称不能为空");
-  user.displayName = name;
-  saveDb(db);
+  const { error } = await supabaseClient
+    .from("profiles")
+    .update({ display_name: name })
+    .eq("id", currentUser.id);
+  if (error) return toast(`保存失败：${error.message}`);
+  currentUser.display_name = name;
   toast("名称已保存");
-  renderMine(user);
+  renderMine(currentUser);
+}
+
+async function logout() {
+  await supabaseClient.auth.signOut();
+  currentSession = null;
+  currentUser = null;
+  toast("已退出登录");
+  renderAuth();
+}
+
+async function checkDailyReminder() {
+  if (!currentUser) return;
+  const clock = beijingClockParts();
+  if (!isAfterReminderTime(clock)) return;
+  if (await hasCheckedOnDate(currentUser.id, clock.date)) return;
+  const key = userReminderKey(currentUser.id, clock.date);
+  if (localStorage.getItem(key)) return;
+  localStorage.setItem(key, "1");
+  notifyUser("读经打卡提醒", "现在已经过了晚上 9:30，今天还没有打卡。");
 }
 
 function nav(title) {
@@ -622,12 +716,14 @@ function nav(title) {
 }
 
 function bindBack() {
-  document.querySelector("#back").addEventListener("click", () => {
-    const db = loadDb();
-    const user = byId(db, getSession());
-    if (user) renderHome(user, db);
-    else renderAuth();
-  });
+  document.querySelector("#back").addEventListener("click", () => renderHome(currentUser));
+}
+
+function setBusy(selector, isBusy, label) {
+  const button = document.querySelector(selector);
+  if (!button) return;
+  button.disabled = isBusy;
+  button.textContent = label;
 }
 
 function toast(message) {
@@ -653,9 +749,4 @@ function escapeAttr(value) {
   return escapeHtml(value).replace(/`/g, "&#096;");
 }
 
-render();
-checkDailyReminder();
-setInterval(checkDailyReminder, 60 * 1000);
-document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) checkDailyReminder();
-});
+init();
