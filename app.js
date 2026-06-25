@@ -3,6 +3,7 @@ const BEIJING_TZ = "Asia/Shanghai";
 const REMINDER_HOUR = 21;
 const REMINDER_MINUTE = 30;
 const SUPER_ADMIN_ACCOUNT = "20010927";
+const CHAT_IMAGE_BUCKET = "chat-images";
 
 const app = document.querySelector("#app");
 app.innerHTML = `<section class="screen auth"><p class="subtitle">正在连接数据库...</p></section>`;
@@ -504,9 +505,9 @@ async function renderChat() {
   const [{ data: messages, error }, { data: profiles }] = await Promise.all([
     supabaseClient
       .from("chat_messages")
-      .select("*")
+      .select("id,user_id,type,text,image_name,created_at")
       .order("created_at", { ascending: false })
-      .limit(50),
+      .limit(20),
     supabaseClient.from("profiles").select("id, display_name")
   ]);
 
@@ -548,6 +549,7 @@ async function renderChat() {
   document.querySelector("#imageInput").addEventListener("change", sendImageMessage);
   document.querySelector("#chatForm").addEventListener("submit", sendChatMessage);
   document.querySelector("#chatInput").focus();
+  bindImageLoadButtons();
   scrollChatBottom();
   openChatRealtime();
   startChatPolling();
@@ -558,8 +560,11 @@ function chatMessageHtml(message, sender, isMine) {
     <div class="chat-message ${isMine ? "mine-message" : ""}" data-message-id="${escapeAttr(message.id)}">
       <div class="chat-meta">${escapeHtml(sender?.display_name || "未知成员")}</div>
       <div class="chat-bubble">
-        ${message.type === "image" ? `
+        ${message.type === "image" && message.image_data ? `
           <img class="chat-image" src="${escapeAttr(message.image_data || "")}" alt="${escapeAttr(message.image_name || "聊天图片")}">
+          ${message.text ? `<span class="chat-caption">${escapeHtml(message.text)}</span>` : ""}
+        ` : message.type === "image" ? `
+          <button class="image-placeholder" type="button" data-image-id="${escapeAttr(message.id)}">查看图片</button>
           ${message.text ? `<span class="chat-caption">${escapeHtml(message.text)}</span>` : ""}
         ` : escapeHtml(message.text || "")}
       </div>
@@ -602,6 +607,7 @@ async function appendLiveMessage(message) {
   const list = document.querySelector("#chatList");
   if (!list) return;
   list.insertAdjacentHTML("beforeend", chatMessageHtml(message, sender, message.user_id === currentUser.id));
+  bindImageLoadButtons();
   if (!lastChatCreatedAt || message.created_at > lastChatCreatedAt) {
     lastChatCreatedAt = message.created_at;
   }
@@ -623,7 +629,7 @@ async function fetchNewChatMessages() {
   if (currentView !== "chat" || !lastChatCreatedAt) return;
   const { data, error } = await supabaseClient
     .from("chat_messages")
-    .select("*")
+    .select("id,user_id,type,text,image_name,created_at")
     .gt("created_at", lastChatCreatedAt)
     .order("created_at", { ascending: true })
     .limit(20);
@@ -631,6 +637,36 @@ async function fetchNewChatMessages() {
   for (const message of data || []) {
     await appendLiveMessage(message);
   }
+}
+
+function bindImageLoadButtons() {
+  document.querySelectorAll(".image-placeholder").forEach((button) => {
+    if (button.dataset.bound === "1") return;
+    button.dataset.bound = "1";
+    button.addEventListener("click", () => loadChatImage(button));
+  });
+}
+
+async function loadChatImage(button) {
+  const messageId = button.dataset.imageId;
+  if (!messageId) return;
+  button.disabled = true;
+  button.textContent = "加载中";
+  const { data, error } = await supabaseClient
+    .from("chat_messages")
+    .select("image_data,image_name")
+    .eq("id", messageId)
+    .maybeSingle();
+  if (error || !data?.image_data) {
+    button.disabled = false;
+    button.textContent = "加载失败";
+    return;
+  }
+  const image = document.createElement("img");
+  image.className = "chat-image";
+  image.src = data.image_data;
+  image.alt = data.image_name || "聊天图片";
+  button.replaceWith(image);
 }
 
 function scrollChatBottom() {
@@ -663,7 +699,7 @@ async function sendChatMessage(event) {
       user_id: currentUser.id,
       text
     })
-    .select("*")
+    .select("id,user_id,type,text,image_name,created_at")
     .single();
   if (error) return toast(`发送失败：${error.message}`);
   if (data && currentView === "chat") await appendLiveMessage(data);
@@ -674,29 +710,99 @@ function sendImageMessage(event) {
   event.target.value = "";
   if (!file) return;
   if (!file.type.startsWith("image/")) return toast("请选择图片文件");
-  if (file.size > 2 * 1024 * 1024) return toast("图片不能超过 2MB");
+  uploadChatImage(file);
+}
 
-  const reader = new FileReader();
-  reader.onload = async () => {
+async function uploadChatImage(file) {
+  const imageButton = document.querySelector("#imageButton");
+  const oldLabel = imageButton?.textContent || "图片";
+  if (imageButton) {
+    imageButton.disabled = true;
+    imageButton.textContent = "上传中";
+  }
+
+  try {
     const caption = document.querySelector("#chatInput")?.value.trim() || "";
+    const imageBlob = await compressImage(file);
+    const filePath = `${currentUser.id}/${Date.now()}-${safeFileName(file.name)}.jpg`;
+    const { error: uploadError } = await supabaseClient.storage
+      .from(CHAT_IMAGE_BUCKET)
+      .upload(filePath, imageBlob, {
+        contentType: "image/jpeg",
+        cacheControl: "31536000",
+        upsert: false
+      });
+
+    if (uploadError) return toast(`图片上传失败：${uploadError.message}`);
+
+    const { data: publicData } = supabaseClient.storage
+      .from(CHAT_IMAGE_BUCKET)
+      .getPublicUrl(filePath);
+    const imageUrl = publicData?.publicUrl;
+    if (!imageUrl) return toast("图片链接生成失败");
+
     const { data, error } = await supabaseClient
       .from("chat_messages")
       .insert({
         type: "image",
         user_id: currentUser.id,
         text: caption,
-        image_data: String(reader.result || ""),
+        image_data: imageUrl,
         image_name: file.name
       })
-      .select("*")
+      .select("id,user_id,type,text,image_name,created_at")
       .single();
+
     if (error) return toast(`图片发送失败：${error.message}`);
+
     const input = document.querySelector("#chatInput");
     if (input) input.value = "";
+    if (data) data.image_data = imageUrl;
     if (data && currentView === "chat") await appendLiveMessage(data);
-  };
-  reader.onerror = () => toast("图片读取失败");
-  reader.readAsDataURL(file);
+  } catch (error) {
+    toast(`图片处理失败：${error.message || "请换一张图片试试"}`);
+  } finally {
+    if (imageButton) {
+      imageButton.disabled = false;
+      imageButton.textContent = oldLabel;
+    }
+  }
+}
+
+function safeFileName(name) {
+  return String(name || "image")
+    .replace(/\.[a-z0-9]+$/i, "")
+    .replace(/[^a-z0-9_-]+/gi, "-")
+    .slice(0, 40) || "image";
+}
+
+function compressImage(file) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    const objectUrl = URL.createObjectURL(file);
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      const maxSide = 1280;
+      const scale = Math.min(1, maxSide / Math.max(image.width, image.height));
+      const width = Math.max(1, Math.round(image.width * scale));
+      const height = Math.max(1, Math.round(image.height * scale));
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return reject(new Error("无法处理图片"));
+      ctx.drawImage(image, 0, 0, width, height);
+      canvas.toBlob((blob) => {
+        if (!blob) return reject(new Error("图片压缩失败"));
+        resolve(blob);
+      }, "image/jpeg", 0.78);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error("图片读取失败"));
+    };
+    image.src = objectUrl;
+  });
 }
 
 function renderMine(user) {

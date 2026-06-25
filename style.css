@@ -470,6 +470,22 @@ select {
   object-fit: cover;
 }
 
+.image-placeholder {
+  min-height: 42px;
+  border: 1px solid rgba(79, 117, 92, 0.25);
+  border-radius: 12px;
+  background: rgba(255, 250, 241, 0.72);
+  color: var(--sage);
+  padding: 0 14px;
+  font-weight: 700;
+}
+
+.mine-message .image-placeholder {
+  border-color: rgba(255, 255, 255, 0.35);
+  background: rgba(255, 255, 255, 0.16);
+  color: white;
+}
+
 .chat-caption {
   display: block;
   margin-top: 8px;
