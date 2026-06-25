@@ -1,0 +1,16 @@
+{
+  "name": "读经打卡",
+  "short_name": "读经打卡",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#f7f2e9",
+  "theme_color": "#f7f2e9",
+  "icons": [
+    {
+      "src": "./assets/app-icon.png",
+      "sizes": "1024x1024",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
