@@ -328,16 +328,30 @@ async function init() {
     await render();
   });
 
-  const [profile] = await Promise.all([
-    loadCurrentProfile(),
-    wait(MIN_LOADING_MS)
-  ]);
+  const authPromise = loadCurrentProfile();
+  await wait(MIN_LOADING_MS);
   startupGateOpen = true;
+
+  if (currentUser) {
+    renderHome(currentUser);
+    startReminderLoops();
+    authPromise.then(async (profile) => {
+      if (profile === "pending") {
+        scheduleAuthRetry();
+        return;
+      }
+      if (profile) {
+        await render();
+        startReminderLoops();
+      }
+    });
+    return;
+  }
+
+  const profile = await authPromise;
   if (profile === "pending") {
-    if (currentUser) renderHome(currentUser);
-    else renderLoading();
+    renderLoading();
     scheduleAuthRetry();
-    if (currentUser) startReminderLoops();
     return;
   }
   await render();
