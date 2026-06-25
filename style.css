@@ -378,12 +378,15 @@ select {
 }
 
 .chat-message {
+  width: fit-content;
   max-width: 82%;
+  margin-right: auto;
   margin-bottom: 16px;
 }
 
 .mine-message {
   margin-left: auto;
+  margin-right: 0;
 }
 
 .chat-meta {
@@ -412,6 +415,7 @@ select {
   background: var(--sage);
   border-color: var(--sage);
   color: white;
+  text-align: left;
 }
 
 .chat-compose {

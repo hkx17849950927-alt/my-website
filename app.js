@@ -16,6 +16,9 @@ let currentSession = null;
 let currentUser = null;
 let currentView = "home";
 let chatChannel = null;
+let profileCache = new Map();
+let chatPollTimer = null;
+let lastChatCreatedAt = null;
 
 const VERSES = [
   { text: "耶和华是我的牧者，我必不至缺乏。", ref: "诗篇 23:1" },
@@ -502,14 +505,17 @@ async function renderChat() {
     supabaseClient
       .from("chat_messages")
       .select("*")
-      .order("created_at", { ascending: true })
-      .limit(200),
+      .order("created_at", { ascending: false })
+      .limit(50),
     supabaseClient.from("profiles").select("id, display_name")
   ]);
 
   if (error) return toast(`群聊读取失败：${error.message}`);
 
   const profileMap = new Map((profiles || []).map((profile) => [profile.id, profile]));
+  profileCache = profileMap;
+  const visibleMessages = [...(messages || [])].reverse();
+  lastChatCreatedAt = visibleMessages.at(-1)?.created_at || new Date().toISOString();
   const muteText = currentUser.chat_muted ? "免打扰：开" : "免打扰：关";
 
   app.innerHTML = html`
@@ -520,9 +526,9 @@ async function renderChat() {
         <span>@昵称、@账号、@所有人 会提醒</span>
       </div>
       <div class="chat-list" id="chatList">
-        ${(messages || []).length === 0 ? `
+        ${visibleMessages.length === 0 ? `
           <div class="empty-chat">还没有消息</div>
-        ` : (messages || []).map((message) => {
+        ` : visibleMessages.map((message) => {
           const sender = profileMap.get(message.user_id);
           const isMine = message.user_id === currentUser.id;
           return chatMessageHtml(message, sender, isMine);
@@ -544,6 +550,7 @@ async function renderChat() {
   document.querySelector("#chatInput").focus();
   scrollChatBottom();
   openChatRealtime();
+  startChatPolling();
 }
 
 function chatMessageHtml(message, sender, isMine) {
@@ -578,6 +585,7 @@ function openChatRealtime() {
 }
 
 function closeChatRealtime() {
+  stopChatPolling();
   if (!chatChannel) return;
   supabaseClient.removeChannel(chatChannel);
   chatChannel = null;
@@ -586,11 +594,43 @@ function closeChatRealtime() {
 async function appendLiveMessage(message) {
   if (document.querySelector(`[data-message-id="${CSS.escape(message.id)}"]`)) return;
   document.querySelector(".empty-chat")?.remove();
-  const sender = await getProfile(message.user_id);
+  let sender = profileCache.get(message.user_id);
+  if (!sender) {
+    sender = await getProfile(message.user_id);
+    if (sender) profileCache.set(sender.id, sender);
+  }
   const list = document.querySelector("#chatList");
   if (!list) return;
   list.insertAdjacentHTML("beforeend", chatMessageHtml(message, sender, message.user_id === currentUser.id));
+  if (!lastChatCreatedAt || message.created_at > lastChatCreatedAt) {
+    lastChatCreatedAt = message.created_at;
+  }
   scrollChatBottom();
+}
+
+function startChatPolling() {
+  stopChatPolling();
+  chatPollTimer = setInterval(fetchNewChatMessages, 4000);
+}
+
+function stopChatPolling() {
+  if (!chatPollTimer) return;
+  clearInterval(chatPollTimer);
+  chatPollTimer = null;
+}
+
+async function fetchNewChatMessages() {
+  if (currentView !== "chat" || !lastChatCreatedAt) return;
+  const { data, error } = await supabaseClient
+    .from("chat_messages")
+    .select("*")
+    .gt("created_at", lastChatCreatedAt)
+    .order("created_at", { ascending: true })
+    .limit(20);
+  if (error) return;
+  for (const message of data || []) {
+    await appendLiveMessage(message);
+  }
 }
 
 function scrollChatBottom() {
@@ -615,14 +655,18 @@ async function sendChatMessage(event) {
   const input = document.querySelector("#chatInput");
   const text = input.value.trim();
   if (!text) return toast("消息不能为空");
-  const { error } = await supabaseClient.from("chat_messages").insert({
-    type: "text",
-    user_id: currentUser.id,
-    text
-  });
-  if (error) return toast(`发送失败：${error.message}`);
   input.value = "";
-  await renderChat();
+  const { data, error } = await supabaseClient
+    .from("chat_messages")
+    .insert({
+      type: "text",
+      user_id: currentUser.id,
+      text
+    })
+    .select("*")
+    .single();
+  if (error) return toast(`发送失败：${error.message}`);
+  if (data && currentView === "chat") await appendLiveMessage(data);
 }
 
 function sendImageMessage(event) {
@@ -635,17 +679,21 @@ function sendImageMessage(event) {
   const reader = new FileReader();
   reader.onload = async () => {
     const caption = document.querySelector("#chatInput")?.value.trim() || "";
-    const { error } = await supabaseClient.from("chat_messages").insert({
-      type: "image",
-      user_id: currentUser.id,
-      text: caption,
-      image_data: String(reader.result || ""),
-      image_name: file.name
-    });
+    const { data, error } = await supabaseClient
+      .from("chat_messages")
+      .insert({
+        type: "image",
+        user_id: currentUser.id,
+        text: caption,
+        image_data: String(reader.result || ""),
+        image_name: file.name
+      })
+      .select("*")
+      .single();
     if (error) return toast(`图片发送失败：${error.message}`);
     const input = document.querySelector("#chatInput");
     if (input) input.value = "";
-    await renderChat();
+    if (data && currentView === "chat") await appendLiveMessage(data);
   };
   reader.onerror = () => toast("图片读取失败");
   reader.readAsDataURL(file);
