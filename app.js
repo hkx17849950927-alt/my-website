@@ -4,6 +4,9 @@ const REMINDER_HOUR = 21;
 const REMINDER_MINUTE = 30;
 const SUPER_ADMIN_ACCOUNT = "20010927";
 const CHAT_IMAGE_BUCKET = "chat-images";
+const PROFILE_CACHE_KEY = "bible-checkin-profile-cache-v1";
+const CHECKIN_CACHE_KEY = "bible-checkin-checkin-cache-v1";
+const CHAT_CACHE_KEY = "bible-checkin-chat-cache-v1";
 
 const app = document.querySelector("#app");
 const supabaseClient = window.supabase?.createClient(
@@ -37,12 +40,10 @@ const VERSES = [
 
 const OPENING_VERSE = pickOpeningVerse();
 const LOADING_SCENES = [
-  { image: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=900&q=80", verse: "你们要休息，要知道我是神。", ref: "诗篇 46:10" },
-  { image: "https://images.unsplash.com/photo-1441974231531-c6227db76b6e?auto=format&fit=crop&w=900&q=80", verse: "耶和华是我的亮光，是我的拯救。", ref: "诗篇 27:1" },
-  { image: "https://images.unsplash.com/photo-1501785888041-af3ef285b470?auto=format&fit=crop&w=900&q=80", verse: "疲乏的，他赐能力；软弱的，他加力量。", ref: "以赛亚书 40:29" },
-  { image: "https://images.unsplash.com/photo-1470252649378-9c29740c9fa8?auto=format&fit=crop&w=900&q=80", verse: "早晨，我必向你陈明我的心意，并要警醒。", ref: "诗篇 5:3" },
-  { image: "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=900&q=80", verse: "你要专心仰赖耶和华，不可倚靠自己的聪明。", ref: "箴言 3:5" },
-  { image: "https://images.unsplash.com/photo-1493246507139-91e8fad9978e?auto=format&fit=crop&w=900&q=80", verse: "我的帮助从造天地的耶和华而来。", ref: "诗篇 121:2" }
+  { image: "./assets/loading-1.png", verse: "你们要休息，要知道我是神。", ref: "诗篇 46:10" },
+  { image: "./assets/loading-2.png", verse: "耶和华是我的亮光，是我的拯救。", ref: "诗篇 27:1" },
+  { image: "./assets/loading-3.png", verse: "疲乏的，他赐能力；软弱的，他加力量。", ref: "以赛亚书 40:29" },
+  { image: "./assets/loading-4.png", verse: "我的帮助从造天地的耶和华而来。", ref: "诗篇 121:2" }
 ];
 const LOADING_SCENE = pickLoadingScene();
 
@@ -110,6 +111,60 @@ function isAfterReminderTime(clock) {
 
 function userReminderKey(userId, date) {
   return `${REMINDER_KEY}:${userId}:${date}`;
+}
+
+function readCache(key, fallback) {
+  try {
+    return JSON.parse(localStorage.getItem(key)) ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeCache(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Local cache is only for speed. If storage is full, the app still works online.
+  }
+}
+
+function clearAppCache() {
+  localStorage.removeItem(PROFILE_CACHE_KEY);
+  localStorage.removeItem(CHECKIN_CACHE_KEY);
+  localStorage.removeItem(CHAT_CACHE_KEY);
+}
+
+function cacheProfile(profile) {
+  if (profile) writeCache(PROFILE_CACHE_KEY, profile);
+}
+
+function getCachedProfile() {
+  return readCache(PROFILE_CACHE_KEY, null);
+}
+
+function getCachedCheckins() {
+  return readCache(CHECKIN_CACHE_KEY, {});
+}
+
+function isCachedChecked(userId, date) {
+  return Boolean(getCachedCheckins()[`${userId}:${date}`]);
+}
+
+function setCachedChecked(userId, date, checked) {
+  const cache = getCachedCheckins();
+  const key = `${userId}:${date}`;
+  if (checked) cache[key] = true;
+  else delete cache[key];
+  writeCache(CHECKIN_CACHE_KEY, cache);
+}
+
+function getCachedChatMessages() {
+  return readCache(CHAT_CACHE_KEY, []);
+}
+
+function cacheChatMessages(messages) {
+  writeCache(CHAT_CACHE_KEY, (messages || []).slice(-30));
 }
 
 function notifyUser(title, body) {
@@ -186,6 +241,7 @@ async function loadCurrentProfile() {
     return null;
   }
   currentUser = await getProfile(currentSession.user.id);
+  cacheProfile(currentUser);
   return currentUser;
 }
 
@@ -208,7 +264,7 @@ function scheduleAuthRetry() {
   authRetryTimer = setTimeout(async () => {
     const profile = await loadCurrentProfile();
     if (profile === "pending") {
-      renderLoading();
+      if (!currentUser) renderLoading();
       scheduleAuthRetry();
       return;
     }
@@ -233,12 +289,18 @@ async function init() {
     return;
   }
 
-  renderLoading();
+  const cachedProfile = getCachedProfile();
+  if (cachedProfile && hasStoredAuthSession()) {
+    currentUser = cachedProfile;
+    renderHome(currentUser);
+  } else {
+    renderLoading();
+  }
 
   supabaseClient.auth.onAuthStateChange(async () => {
     const profile = await loadCurrentProfile();
     if (profile === "pending") {
-      renderLoading();
+      if (!currentUser) renderLoading();
       scheduleAuthRetry();
       return;
     }
@@ -247,7 +309,7 @@ async function init() {
 
   const profile = await loadCurrentProfile();
   if (profile === "pending") {
-    renderLoading();
+    if (!currentUser) renderLoading();
     scheduleAuthRetry();
     return;
   }
@@ -397,10 +459,10 @@ function friendlyAuthError(message) {
   return message || "操作失败";
 }
 
-async function renderHome(user) {
+function renderHome(user) {
   currentView = "home";
   const { date } = beijingParts();
-  const checked = await hasCheckedOnDate(user.id, date);
+  const checked = isCachedChecked(user.id, date);
   app.innerHTML = html`
     <section class="screen">
       <header class="home-head">
@@ -425,6 +487,7 @@ async function renderHome(user) {
   document.querySelector("#members").addEventListener("click", () => renderMembers());
   document.querySelector("#chat").addEventListener("click", () => renderChat());
   document.querySelector("#checkin").addEventListener("click", () => checkin(user.id));
+  syncTodayCheckinState(user.id, date);
 }
 
 async function hasCheckedOnDate(userId, date) {
@@ -438,8 +501,22 @@ async function hasCheckedOnDate(userId, date) {
   return Boolean(data);
 }
 
+async function syncTodayCheckinState(userId, date) {
+  const checked = await hasCheckedOnDate(userId, date);
+  setCachedChecked(userId, date, checked);
+  if (currentView !== "home" || currentUser?.id !== userId) return;
+  const button = document.querySelector("#checkin");
+  if (button) button.textContent = checked ? "今日已打卡" : "今日打卡";
+}
+
 async function checkin(userId) {
   const { date, month } = beijingParts();
+  setCachedChecked(userId, date, true);
+  const button = document.querySelector("#checkin");
+  if (button) {
+    button.textContent = "今日已打卡";
+    button.disabled = true;
+  }
   const { error } = await supabaseClient.from("checkin_records").insert({
     user_id: userId,
     checkin_date: date,
@@ -448,14 +525,21 @@ async function checkin(userId) {
 
   if (error) {
     if (error.code === "23505") {
+      setCachedChecked(userId, date, true);
       toast("今天已经打过卡了");
-      await renderHome(currentUser);
+      renderHome(currentUser);
       return;
+    }
+    setCachedChecked(userId, date, false);
+    if (button) {
+      button.textContent = "今日打卡";
+      button.disabled = false;
     }
     return toast(`打卡失败：${error.message}`);
   }
+  setCachedChecked(userId, date, true);
   toast("今日已打卡");
-  await renderHome(currentUser);
+  renderHome(currentUser);
 }
 
 async function availableMonths() {
@@ -578,6 +662,12 @@ async function deleteMember(userId) {
 
 async function renderChat() {
   currentView = "chat";
+  const cachedMessages = getCachedChatMessages();
+  renderChatShell(cachedMessages, profileCache);
+  refreshChatFromServer();
+}
+
+async function refreshChatFromServer() {
   const [{ data: messages, error }, { data: profiles }] = await Promise.all([
     supabaseClient
       .from("chat_messages")
@@ -592,6 +682,11 @@ async function renderChat() {
   const profileMap = new Map((profiles || []).map((profile) => [profile.id, profile]));
   profileCache = profileMap;
   const visibleMessages = [...(messages || [])].reverse();
+  cacheChatMessages(visibleMessages);
+  renderChatShell(visibleMessages, profileMap);
+}
+
+function renderChatShell(visibleMessages, profileMap) {
   lastChatCreatedAt = visibleMessages.at(-1)?.created_at || new Date().toISOString();
   const muteText = currentUser.chat_muted ? "免打扰：开" : "免打扰：关";
 
@@ -606,7 +701,7 @@ async function renderChat() {
         ${visibleMessages.length === 0 ? `
           <div class="empty-chat">还没有消息</div>
         ` : visibleMessages.map((message) => {
-          const sender = profileMap.get(message.user_id);
+          const sender = profileMap.get(message.user_id) || (message.user_id === currentUser.id ? currentUser : null);
           const isMine = message.user_id === currentUser.id;
           return chatMessageHtml(message, sender, isMine);
         }).join("")}
@@ -634,8 +729,8 @@ async function renderChat() {
 
 function chatMessageHtml(message, sender, isMine) {
   return `
-    <div class="chat-message ${isMine ? "mine-message" : ""}" data-message-id="${escapeAttr(message.id)}">
-      <div class="chat-meta">${escapeHtml(sender?.display_name || "未知成员")}</div>
+    <div class="chat-message ${isMine ? "mine-message" : ""} ${message.pending ? "pending-message" : ""}" data-message-id="${escapeAttr(message.id)}">
+      <div class="chat-meta">${escapeHtml(sender?.display_name || "未知成员")}${message.pending ? " · 发送中" : ""}</div>
       <div class="chat-bubble">
         ${message.type === "image" && message.image_data ? `
           <img class="chat-image" src="${escapeAttr(message.image_data || "")}" alt="${escapeAttr(message.image_name || "聊天图片")}" data-full-image="${escapeAttr(message.image_data || "")}">
@@ -676,7 +771,7 @@ function closeChatRealtime() {
 async function appendLiveMessage(message) {
   if (document.querySelector(`[data-message-id="${CSS.escape(message.id)}"]`)) return;
   document.querySelector(".empty-chat")?.remove();
-  let sender = profileCache.get(message.user_id);
+  let sender = profileCache.get(message.user_id) || (message.user_id === currentUser.id ? currentUser : null);
   if (!sender) {
     sender = await getProfile(message.user_id);
     if (sender) profileCache.set(sender.id, sender);
@@ -684,6 +779,10 @@ async function appendLiveMessage(message) {
   const list = document.querySelector("#chatList");
   if (!list) return;
   list.insertAdjacentHTML("beforeend", chatMessageHtml(message, sender, message.user_id === currentUser.id));
+  if (!message.pending) {
+    const cached = getCachedChatMessages().filter((item) => item.id !== message.id && !String(item.id).startsWith("local-"));
+    cacheChatMessages([...cached, message]);
+  }
   bindImageLoadButtons();
   bindChatImagePreview();
   if (!lastChatCreatedAt || message.created_at > lastChatCreatedAt) {
@@ -797,6 +896,16 @@ async function sendChatMessage(event) {
   const text = input.value.trim();
   if (!text) return toast("消息不能为空");
   input.value = "";
+  const localId = `local-${Date.now()}`;
+  const localMessage = {
+    id: localId,
+    type: "text",
+    user_id: currentUser.id,
+    text,
+    created_at: new Date().toISOString(),
+    pending: true
+  };
+  if (currentView === "chat") await appendLiveMessage(localMessage);
   const { data, error } = await supabaseClient
     .from("chat_messages")
     .insert({
@@ -806,7 +915,14 @@ async function sendChatMessage(event) {
     })
     .select("id,user_id,type,text,image_name,created_at")
     .single();
-  if (error) return toast(`发送失败：${error.message}`);
+  if (error) {
+    const node = document.querySelector(`[data-message-id="${CSS.escape(localId)}"]`);
+    node?.classList.add("failed-message");
+    const meta = node?.querySelector(".chat-meta");
+    if (meta) meta.textContent = `${currentUser.display_name || "我"} · 发送失败`;
+    return toast(`发送失败：${error.message}`);
+  }
+  document.querySelector(`[data-message-id="${CSS.escape(localId)}"]`)?.remove();
   if (data && currentView === "chat") await appendLiveMessage(data);
 }
 
@@ -947,6 +1063,7 @@ async function saveName() {
     .eq("id", currentUser.id);
   if (error) return toast(`保存失败：${error.message}`);
   currentUser.display_name = name;
+  cacheProfile(currentUser);
   toast("名称已保存");
   renderMine(currentUser);
 }
@@ -955,6 +1072,7 @@ async function logout() {
   await supabaseClient.auth.signOut();
   currentSession = null;
   currentUser = null;
+  clearAppCache();
   toast("已退出登录");
   renderAuth();
 }

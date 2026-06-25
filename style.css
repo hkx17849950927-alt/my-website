@@ -451,6 +451,18 @@ select {
   text-align: right;
 }
 
+.pending-message {
+  opacity: 0.72;
+}
+
+.failed-message {
+  opacity: 1;
+}
+
+.failed-message .chat-meta {
+  color: var(--danger);
+}
+
 .chat-bubble {
   display: inline-block;
   max-width: 100%;
