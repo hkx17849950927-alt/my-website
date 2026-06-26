@@ -132,6 +132,12 @@ using (
   )
 );
 
+drop policy if exists "messages_delete_own" on public.chat_messages;
+create policy "messages_delete_own"
+on public.chat_messages for delete
+to authenticated
+using (user_id = auth.uid());
+
 drop policy if exists "push_subscriptions_select_own" on public.push_subscriptions;
 create policy "push_subscriptions_select_own"
 on public.push_subscriptions for select

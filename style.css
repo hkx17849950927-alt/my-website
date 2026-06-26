@@ -470,6 +470,14 @@ select {
   font-size: 17px;
 }
 
+.chat-history-status {
+  min-height: 32px;
+  margin: 0 0 12px;
+  color: var(--muted);
+  text-align: center;
+  font-size: 14px;
+}
+
 .chat-message {
   width: fit-content;
   max-width: 82%;

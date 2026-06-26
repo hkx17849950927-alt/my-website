@@ -1,4 +1,4 @@
-const APP_VERSION = "2026.06.26-chat-push1";
+const APP_VERSION = "2026.06.26-message-tools1";
 const REMINDER_KEY = "bible-checkin-reminded-v1";
 const BEIJING_TZ = "Asia/Shanghai";
 const REMINDER_HOUR = 21;
@@ -10,6 +10,7 @@ const PROFILE_CACHE_KEY = "bible-checkin-profile-cache-v1";
 const CHECKIN_CACHE_KEY = "bible-checkin-checkin-cache-v1";
 const CHAT_CACHE_KEY = "bible-checkin-chat-cache-v1";
 const CHAT_SEEN_KEY = "bible-checkin-chat-seen-v1";
+const CHAT_PAGE_SIZE = 20;
 const MIN_LOADING_MS = 5000;
 const VERSION_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 
@@ -27,6 +28,9 @@ let chatChannel = null;
 let profileCache = new Map();
 let chatPollTimer = null;
 let lastChatCreatedAt = null;
+let chatOldestCreatedAt = null;
+let chatHasMore = true;
+let chatLoadingOlder = false;
 let authRetryTimer = null;
 let reminderLoopsStarted = false;
 let startupGateOpen = false;
@@ -990,7 +994,10 @@ async function deleteMember(userId) {
 
 async function renderChat() {
   currentView = "chat";
-  const cachedMessages = getCachedChatMessages();
+  chatOldestCreatedAt = null;
+  chatHasMore = true;
+  chatLoadingOlder = false;
+  const cachedMessages = getCachedChatMessages().slice(-CHAT_PAGE_SIZE);
   renderChatShell(cachedMessages, profileCache);
   refreshChatFromServer();
 }
@@ -1001,7 +1008,7 @@ async function refreshChatFromServer() {
       .from("chat_messages")
       .select("id,user_id,type,text,image_name,created_at")
       .order("created_at", { ascending: false })
-      .limit(20),
+      .limit(CHAT_PAGE_SIZE),
     supabaseClient.from("profiles").select("id, display_name")
   ]);
 
@@ -1010,12 +1017,15 @@ async function refreshChatFromServer() {
   const profileMap = new Map((profiles || []).map((profile) => [profile.id, profile]));
   profileCache = profileMap;
   const visibleMessages = [...(messages || [])].reverse();
+  chatOldestCreatedAt = visibleMessages[0]?.created_at || null;
+  chatHasMore = visibleMessages.length === CHAT_PAGE_SIZE;
   cacheChatMessages(visibleMessages);
   renderChatShell(visibleMessages, profileMap);
 }
 
 function renderChatShell(visibleMessages, profileMap) {
   lastChatCreatedAt = visibleMessages.at(-1)?.created_at || new Date().toISOString();
+  chatOldestCreatedAt = visibleMessages[0]?.created_at || chatOldestCreatedAt;
   setChatSeenAt(currentUser.id, latestChatCreatedAt(visibleMessages, currentUser.id));
   const muteText = currentUser.chat_muted ? "免打扰：开" : "免打扰：关";
 
@@ -1027,6 +1037,7 @@ function renderChatShell(visibleMessages, profileMap) {
         <span>@昵称、@账号、@所有人 会提醒</span>
       </div>
       <div class="chat-list" id="chatList">
+        <div class="chat-history-status hidden" id="chatHistoryStatus">加载更早消息中</div>
         ${visibleMessages.length === 0 ? `
           <div class="empty-chat">还没有消息</div>
         ` : visibleMessages.map((message) => {
@@ -1051,6 +1062,8 @@ function renderChatShell(visibleMessages, profileMap) {
   document.querySelector("#chatInput").focus();
   bindImageLoadButtons();
   bindChatImagePreview();
+  bindChatMessageActions();
+  bindChatScrollLoader();
   scrollChatBottom();
   openChatRealtime();
   startChatPolling();
@@ -1058,7 +1071,7 @@ function renderChatShell(visibleMessages, profileMap) {
 
 function chatMessageHtml(message, sender, isMine) {
   return `
-    <div class="chat-message ${isMine ? "mine-message" : ""} ${message.pending ? "pending-message" : ""}" data-message-id="${escapeAttr(message.id)}">
+    <div class="chat-message ${isMine ? "mine-message" : ""} ${message.pending ? "pending-message" : ""}" data-message-id="${escapeAttr(message.id)}" data-user-id="${escapeAttr(message.user_id)}">
       <div class="chat-meta">${escapeHtml(sender?.display_name || "未知成员")}${message.pending ? " · 发送中" : ""}</div>
       <div class="chat-bubble">
         ${message.type === "image" && message.image_data ? `
@@ -1087,6 +1100,13 @@ function openChatRealtime() {
       }
       await notifyChatMessage(payload.new);
     })
+    .on("postgres_changes", {
+      event: "DELETE",
+      schema: "public",
+      table: "chat_messages"
+    }, (payload) => {
+      removeChatMessage(payload.old?.id);
+    })
     .subscribe();
 }
 
@@ -1114,6 +1134,7 @@ async function appendLiveMessage(message) {
   }
   bindImageLoadButtons();
   bindChatImagePreview();
+  bindChatMessageActions();
   if (!lastChatCreatedAt || message.created_at > lastChatCreatedAt) {
     lastChatCreatedAt = message.created_at;
   }
@@ -1121,6 +1142,143 @@ async function appendLiveMessage(message) {
     setChatSeenAt(currentUser.id, message.created_at);
   }
   scrollChatBottom();
+}
+
+function bindChatScrollLoader() {
+  const list = document.querySelector("#chatList");
+  if (!list || list.dataset.historyBound === "1") return;
+  list.dataset.historyBound = "1";
+  list.addEventListener("scroll", () => {
+    if (list.scrollTop <= 24) loadOlderChatMessages();
+  });
+}
+
+async function loadOlderChatMessages() {
+  const list = document.querySelector("#chatList");
+  const status = document.querySelector("#chatHistoryStatus");
+  if (!list || !chatOldestCreatedAt || chatLoadingOlder || !chatHasMore) return;
+
+  chatLoadingOlder = true;
+  if (status) {
+    status.textContent = "加载更早消息中";
+    status.classList.remove("hidden");
+  }
+
+  const oldHeight = list.scrollHeight;
+  const oldTop = list.scrollTop;
+  const { data, error } = await supabaseClient
+    .from("chat_messages")
+    .select("id,user_id,type,text,image_name,created_at")
+    .lt("created_at", chatOldestCreatedAt)
+    .order("created_at", { ascending: false })
+    .limit(CHAT_PAGE_SIZE);
+
+  if (error) {
+    chatLoadingOlder = false;
+    if (status) status.classList.add("hidden");
+    return toast(`历史消息加载失败：${error.message}`);
+  }
+
+  const olderMessages = [...(data || [])].reverse();
+  if (olderMessages.length === 0) {
+    chatHasMore = false;
+    if (status) {
+      status.textContent = "没有更早消息";
+      setTimeout(() => status.classList.add("hidden"), 1200);
+    }
+    chatLoadingOlder = false;
+    return;
+  }
+
+  await ensureProfilesForMessages(olderMessages);
+  chatOldestCreatedAt = olderMessages[0]?.created_at || chatOldestCreatedAt;
+  chatHasMore = olderMessages.length === CHAT_PAGE_SIZE;
+
+  const htmlText = olderMessages.map((message) => {
+    const sender = profileCache.get(message.user_id) || (message.user_id === currentUser.id ? currentUser : null);
+    return chatMessageHtml(message, sender, message.user_id === currentUser.id);
+  }).join("");
+
+  if (status) status.insertAdjacentHTML("afterend", htmlText);
+  else list.insertAdjacentHTML("afterbegin", htmlText);
+  bindImageLoadButtons();
+  bindChatImagePreview();
+  bindChatMessageActions();
+  list.scrollTop = list.scrollHeight - oldHeight + oldTop;
+
+  if (status) status.classList.add("hidden");
+  chatLoadingOlder = false;
+}
+
+async function ensureProfilesForMessages(messages) {
+  const missingIds = [...new Set((messages || [])
+    .map((message) => message.user_id)
+    .filter((userId) => userId && !profileCache.has(userId) && userId !== currentUser.id))];
+  await Promise.all(missingIds.map(async (userId) => {
+    const profile = await getProfile(userId);
+    if (profile) profileCache.set(profile.id, profile);
+  }));
+}
+
+function bindChatMessageActions() {
+  document.querySelectorAll(".mine-message[data-message-id]").forEach((node) => {
+    const messageId = node.dataset.messageId;
+    if (node.dataset.actionBound === "1" || !messageId || String(messageId).startsWith("local-")) return;
+    node.dataset.actionBound = "1";
+
+    let pressTimer = null;
+    const clearPressTimer = () => {
+      if (!pressTimer) return;
+      clearTimeout(pressTimer);
+      pressTimer = null;
+    };
+
+    node.addEventListener("pointerdown", (event) => {
+      if (event.target.closest("button, input")) return;
+      clearPressTimer();
+      pressTimer = setTimeout(() => {
+        pressTimer = null;
+        askDeleteChatMessage(messageId);
+      }, 650);
+    });
+    node.addEventListener("pointerup", clearPressTimer);
+    node.addEventListener("pointercancel", clearPressTimer);
+    node.addEventListener("pointerleave", clearPressTimer);
+    node.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      askDeleteChatMessage(messageId);
+    });
+  });
+}
+
+function askDeleteChatMessage(messageId) {
+  if (!messageId) return;
+  if (confirm("删除这条消息吗？删除后所有人都看不到。")) {
+    deleteChatMessage(messageId);
+  }
+}
+
+async function deleteChatMessage(messageId) {
+  const { error } = await supabaseClient
+    .from("chat_messages")
+    .delete()
+    .eq("id", messageId)
+    .eq("user_id", currentUser.id);
+  if (error) return toast(`删除失败：${error.message}`);
+  removeChatMessage(messageId);
+  toast("消息已删除");
+}
+
+function removeChatMessage(messageId) {
+  if (!messageId) return;
+  document.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`)?.remove();
+  cacheChatMessages(getCachedChatMessages().filter((message) => message.id !== messageId));
+
+  const list = document.querySelector("#chatList");
+  if (list && currentView === "chat" && !list.querySelector(".chat-message")) {
+    document.querySelector(".empty-chat")?.remove();
+    list.insertAdjacentHTML("beforeend", `<div class="empty-chat">还没有消息</div>`);
+  }
 }
 
 function startChatPolling() {
