@@ -1,5 +1,5 @@
-const CACHE_VERSION = "bible-checkin-pwa-v1";
-const RUNTIME_CACHE = "bible-checkin-runtime-v1";
+const CACHE_VERSION = "bible-checkin-pwa-v2";
+const RUNTIME_CACHE = "bible-checkin-runtime-v2";
 
 const CORE_ASSETS = [
   "./",

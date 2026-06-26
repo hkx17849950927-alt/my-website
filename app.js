@@ -1,4 +1,4 @@
-const APP_VERSION = "2026.06.26-push-debug1";
+const APP_VERSION = "2026.06.26-update-fix1";
 const REMINDER_KEY = "bible-checkin-reminded-v1";
 const BEIJING_TZ = "Asia/Shanghai";
 const REMINDER_HOUR = 21;
@@ -548,14 +548,27 @@ async function refreshApp() {
     button.textContent = "更新中";
   }
   try {
+    if ("caches" in window) {
+      const keys = await caches.keys();
+      await Promise.all(
+        keys
+          .filter((key) => key.startsWith("bible-checkin-"))
+          .map((key) => caches.delete(key))
+      );
+    }
     if ("serviceWorker" in navigator) {
-      const registration = await navigator.serviceWorker.getRegistration("./");
-      await registration?.update();
-      navigator.serviceWorker.controller?.postMessage({ type: "REFRESH_APP" });
-      await wait(300);
+      const registrations = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(
+        registrations
+          .filter((registration) => registration.scope.includes(location.origin))
+          .map((registration) => registration.unregister())
+      );
     }
   } finally {
-    window.location.reload();
+    const url = new URL(window.location.href);
+    url.searchParams.set("v", APP_VERSION);
+    url.searchParams.set("refresh", String(Date.now()));
+    window.location.replace(url.toString());
   }
 }
 
