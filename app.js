@@ -1,4 +1,4 @@
-const APP_VERSION = "2026.06.26-message-tools1";
+const APP_VERSION = "2026.06.26-admin-delete1";
 const REMINDER_KEY = "bible-checkin-reminded-v1";
 const BEIJING_TZ = "Asia/Shanghai";
 const REMINDER_HOUR = 21;
@@ -1221,9 +1221,11 @@ async function ensureProfilesForMessages(messages) {
 }
 
 function bindChatMessageActions() {
-  document.querySelectorAll(".mine-message[data-message-id]").forEach((node) => {
+  document.querySelectorAll(".chat-message[data-message-id]").forEach((node) => {
     const messageId = node.dataset.messageId;
     if (node.dataset.actionBound === "1" || !messageId || String(messageId).startsWith("local-")) return;
+    const canDeleteMessage = node.dataset.userId === currentUser.id || isSuperAdmin(currentUser);
+    if (!canDeleteMessage) return;
     node.dataset.actionBound = "1";
 
     let pressTimer = null;
@@ -1259,11 +1261,14 @@ function askDeleteChatMessage(messageId) {
 }
 
 async function deleteChatMessage(messageId) {
-  const { error } = await supabaseClient
+  let query = supabaseClient
     .from("chat_messages")
     .delete()
-    .eq("id", messageId)
-    .eq("user_id", currentUser.id);
+    .eq("id", messageId);
+  if (!isSuperAdmin(currentUser)) {
+    query = query.eq("user_id", currentUser.id);
+  }
+  const { error } = await query;
   if (error) return toast(`删除失败：${error.message}`);
   removeChatMessage(messageId);
   toast("消息已删除");
