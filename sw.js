@@ -7,6 +7,7 @@ const CORE_ASSETS = [
   "./style.css",
   "./app.js",
   "./manifest.webmanifest",
+  "./version.json",
   "./supabase-config.js",
   "./assets/app-icon.png",
   "./assets/loading-1.jpg",
@@ -45,6 +46,11 @@ self.addEventListener("fetch", (event) => {
 
   const url = new URL(request.url);
 
+  if (url.origin === self.location.origin && url.pathname.endsWith("/version.json")) {
+    event.respondWith(fetch(request, { cache: "no-store" }).catch(() => caches.match(request)));
+    return;
+  }
+
   if (request.mode === "navigate") {
     event.respondWith(networkFirst(request, scopedUrl("./index.html")));
     return;
@@ -58,6 +64,19 @@ self.addEventListener("fetch", (event) => {
   if (url.hostname === "cdn.jsdelivr.net") {
     event.respondWith(staleWhileRevalidate(request));
   }
+});
+
+self.addEventListener("message", (event) => {
+  if (event.data?.type !== "REFRESH_APP") return;
+  event.waitUntil(
+    caches.keys()
+      .then((keys) => Promise.all(
+        keys
+          .filter((key) => key.startsWith("bible-checkin-"))
+          .map((key) => caches.delete(key))
+      ))
+      .then(() => self.skipWaiting())
+  );
 });
 
 async function networkFirst(request, fallbackUrl) {

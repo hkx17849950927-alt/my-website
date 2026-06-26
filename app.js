@@ -1,3 +1,4 @@
+const APP_VERSION = "2026.06.26-update1";
 const REMINDER_KEY = "bible-checkin-reminded-v1";
 const BEIJING_TZ = "Asia/Shanghai";
 const REMINDER_HOUR = 21;
@@ -8,6 +9,7 @@ const PROFILE_CACHE_KEY = "bible-checkin-profile-cache-v1";
 const CHECKIN_CACHE_KEY = "bible-checkin-checkin-cache-v1";
 const CHAT_CACHE_KEY = "bible-checkin-chat-cache-v1";
 const MIN_LOADING_MS = 5000;
+const VERSION_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 
 const app = document.querySelector("#app");
 const supabaseClient = window.supabase?.createClient(
@@ -27,6 +29,8 @@ let authRetryTimer = null;
 let reminderLoopsStarted = false;
 let startupGateOpen = false;
 let loadingCountdownTimer = null;
+let versionCheckTimer = null;
+let updatePromptShown = false;
 
 const VERSES = [
   { text: "耶和华是我的牧者，我必不至缺乏。", ref: "诗篇 23:1" },
@@ -306,6 +310,8 @@ function startReminderLoops() {
 }
 
 async function init() {
+  startUpdateChecks();
+
   if (!requireSupabase()) {
     renderError("Supabase 还没有配置好，请检查 supabase-config.js。");
     return;
@@ -356,6 +362,64 @@ async function init() {
   }
   await render();
   startReminderLoops();
+}
+
+function startUpdateChecks() {
+  if (versionCheckTimer) return;
+  checkForAppUpdate();
+  versionCheckTimer = setInterval(checkForAppUpdate, VERSION_CHECK_INTERVAL_MS);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) checkForAppUpdate();
+  });
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.ready
+      .then((registration) => registration.update())
+      .catch(() => {});
+  }
+}
+
+async function checkForAppUpdate() {
+  try {
+    const response = await fetch(`./version.json?ts=${Date.now()}`, { cache: "no-store" });
+    if (!response.ok) return;
+    const latest = await response.json();
+    if (latest?.version && latest.version !== APP_VERSION) {
+      showUpdatePrompt(latest.version);
+    }
+  } catch {
+    // Update checks are best-effort. Offline users can keep using cached content.
+  }
+}
+
+function showUpdatePrompt(version) {
+  if (updatePromptShown || document.querySelector(".update-banner")) return;
+  updatePromptShown = true;
+  const banner = document.createElement("div");
+  banner.className = "update-banner";
+  banner.innerHTML = `
+    <span>发现新版本</span>
+    <button type="button" id="refreshApp">更新</button>
+  `;
+  document.body.appendChild(banner);
+  document.querySelector("#refreshApp").addEventListener("click", () => refreshApp(version));
+}
+
+async function refreshApp() {
+  const button = document.querySelector("#refreshApp");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "更新中";
+  }
+  try {
+    if ("serviceWorker" in navigator) {
+      const registration = await navigator.serviceWorker.getRegistration("./");
+      await registration?.update();
+      navigator.serviceWorker.controller?.postMessage({ type: "REFRESH_APP" });
+      await wait(300);
+    }
+  } finally {
+    window.location.reload();
+  }
 }
 
 async function render() {

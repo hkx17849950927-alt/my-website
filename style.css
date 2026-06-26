@@ -637,6 +637,42 @@ select {
   font-size: 17px;
 }
 
+.update-banner {
+  position: fixed;
+  left: 50%;
+  top: max(14px, env(safe-area-inset-top));
+  transform: translateX(-50%);
+  z-index: 40;
+  width: min(calc(100% - 28px), 420px);
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 12px 10px 18px;
+  border: 1px solid rgba(222, 213, 197, 0.88);
+  border-radius: 18px;
+  background: rgba(255, 250, 240, 0.96);
+  color: var(--ink);
+  box-shadow: 0 14px 34px rgba(38, 48, 44, 0.18);
+  backdrop-filter: blur(10px);
+}
+
+.update-banner span {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.update-banner button {
+  min-width: 72px;
+  min-height: 36px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--sage);
+  color: white;
+  font-weight: 700;
+}
+
 .hidden {
   display: none;
 }
