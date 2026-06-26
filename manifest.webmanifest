@@ -1,10 +1,14 @@
 {
   "name": "读经打卡",
   "short_name": "读经打卡",
+  "description": "读经打卡、排行榜、成员和马拉松群聊。",
+  "id": "./",
   "start_url": "./index.html",
+  "scope": "./",
   "display": "standalone",
   "background_color": "#f7f2e9",
   "theme_color": "#f7f2e9",
+  "orientation": "portrait",
   "icons": [
     {
       "src": "./assets/app-icon.png",
