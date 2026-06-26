@@ -79,6 +79,45 @@ self.addEventListener("message", (event) => {
   );
 });
 
+self.addEventListener("push", (event) => {
+  let payload = {};
+  try {
+    payload = event.data?.json() || {};
+  } catch {
+    payload = { body: event.data?.text() || "" };
+  }
+
+  const title = payload.title || "读经打卡";
+  const options = {
+    body: payload.body || "你有一条新提醒",
+    icon: "./assets/app-icon.png",
+    badge: "./assets/app-icon.png",
+    data: {
+      url: payload.url || "./"
+    }
+  };
+
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const targetUrl = new URL(event.notification.data?.url || "./", self.registration.scope).toString();
+
+  event.waitUntil(
+    clients.matchAll({ type: "window", includeUncontrolled: true })
+      .then((clientList) => {
+        for (const client of clientList) {
+          if (client.url.startsWith(self.registration.scope) && "focus" in client) {
+            client.navigate(targetUrl);
+            return client.focus();
+          }
+        }
+        return clients.openWindow(targetUrl);
+      })
+  );
+});
+
 async function networkFirst(request, fallbackUrl) {
   try {
     const response = await fetch(request);

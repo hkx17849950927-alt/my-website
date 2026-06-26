@@ -1,10 +1,11 @@
-const APP_VERSION = "2026.06.26-update1";
+const APP_VERSION = "2026.06.26-push1";
 const REMINDER_KEY = "bible-checkin-reminded-v1";
 const BEIJING_TZ = "Asia/Shanghai";
 const REMINDER_HOUR = 21;
 const REMINDER_MINUTE = 30;
 const SUPER_ADMIN_ACCOUNT = "20010927";
 const CHAT_IMAGE_BUCKET = "chat-images";
+const PUSH_PUBLIC_KEY = "BFG5J_XNlkijsOExggjOj2XmXyJoQCjdZC9sw3oJqrlFleT5GyUoWnkbFdeBiJKLEI9HLp4RWImLT0u6kXIAVAA";
 const PROFILE_CACHE_KEY = "bible-checkin-profile-cache-v1";
 const CHECKIN_CACHE_KEY = "bible-checkin-checkin-cache-v1";
 const CHAT_CACHE_KEY = "bible-checkin-chat-cache-v1";
@@ -186,6 +187,96 @@ async function requestNotificationAccess() {
   if (Notification.permission === "granted") return toast("系统提醒已开启");
   const permission = await Notification.requestPermission();
   toast(permission === "granted" ? "系统提醒已开启" : "系统提醒未开启");
+}
+
+function supportPushNotifications() {
+  return "serviceWorker" in navigator
+    && "PushManager" in window
+    && "Notification" in window;
+}
+
+function urlBase64ToUint8Array(value) {
+  const padding = "=".repeat((4 - value.length % 4) % 4);
+  const base64 = (value + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = atob(base64);
+  return Uint8Array.from([...rawData].map((char) => char.charCodeAt(0)));
+}
+
+function subscriptionToRecord(subscription) {
+  const value = subscription.toJSON();
+  return {
+    user_id: currentUser.id,
+    endpoint: value.endpoint,
+    p256dh: value.keys?.p256dh || "",
+    auth: value.keys?.auth || "",
+    user_agent: navigator.userAgent,
+    enabled: true
+  };
+}
+
+async function requestPushNotifications() {
+  if (!supportPushNotifications()) return toast("当前浏览器不支持后台推送");
+  if (!PUSH_PUBLIC_KEY) return toast("后台推送密钥还没配置，下一步需要先生成密钥");
+
+  const permission = Notification.permission === "granted"
+    ? "granted"
+    : await Notification.requestPermission();
+  if (permission !== "granted") return toast("系统通知权限未开启");
+
+  try {
+    const registration = await navigator.serviceWorker.ready;
+    const existing = await registration.pushManager.getSubscription();
+    const subscription = existing || await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(PUSH_PUBLIC_KEY)
+    });
+
+    const { error } = await supabaseClient
+      .from("push_subscriptions")
+      .upsert(subscriptionToRecord(subscription), { onConflict: "user_id,endpoint" });
+    if (error) return toast(`推送订阅保存失败：${error.message}`);
+    toast("后台推送提醒已开启");
+  } catch (error) {
+    toast(`后台推送开启失败：${error.message || "请换浏览器再试"}`);
+  }
+}
+
+async function disablePushNotifications() {
+  if (!supportPushNotifications()) return toast("当前浏览器不支持后台推送");
+  try {
+    const registration = await navigator.serviceWorker.ready;
+    const subscription = await registration.pushManager.getSubscription();
+    if (subscription) {
+      await supabaseClient
+        .from("push_subscriptions")
+        .update({ enabled: false })
+        .eq("user_id", currentUser.id)
+        .eq("endpoint", subscription.endpoint);
+      await subscription.unsubscribe();
+    }
+    toast("后台推送提醒已关闭");
+  } catch (error) {
+    toast(`关闭失败：${error.message || "请稍后再试"}`);
+  }
+}
+
+async function sendTestPushNotification() {
+  if (!supportPushNotifications()) return toast("当前浏览器不支持后台推送");
+  if (!PUSH_PUBLIC_KEY) return toast("后台推送密钥还没配置");
+
+  try {
+    const { error } = await supabaseClient.functions.invoke("send-test-push", {
+      body: {
+        title: "读经打卡测试提醒",
+        body: "如果你看到了这条通知，后台推送已经连通。",
+        url: "./"
+      }
+    });
+    if (error) return toast(`测试推送失败：${error.message}`);
+    toast("测试推送已发送");
+  } catch (error) {
+    toast(`测试推送失败：${error.message || "请确认 Edge Function 已部署"}`);
+  }
 }
 
 function isMentionForUser(text, user) {
@@ -1149,6 +1240,9 @@ function renderMine(user) {
         <button class="primary" id="saveName">保存名称</button>
 
         <button class="secondary" id="enableNotifications">开启系统提醒</button>
+        <button class="secondary" id="enablePush">开启后台推送提醒</button>
+        <button class="secondary" id="testPush">发送测试推送</button>
+        <button class="text-button" id="disablePush">关闭后台推送提醒</button>
 
         <button class="text-button danger" id="logout">退出登录</button>
       </div>
@@ -1157,6 +1251,9 @@ function renderMine(user) {
   bindBack();
   document.querySelector("#saveName").addEventListener("click", saveName);
   document.querySelector("#enableNotifications").addEventListener("click", requestNotificationAccess);
+  document.querySelector("#enablePush").addEventListener("click", requestPushNotifications);
+  document.querySelector("#testPush").addEventListener("click", sendTestPushNotification);
+  document.querySelector("#disablePush").addEventListener("click", disablePushNotifications);
   document.querySelector("#logout").addEventListener("click", logout);
 }
 
