@@ -1,4 +1,4 @@
-const APP_VERSION = "2026.06.26-update-fix1";
+const APP_VERSION = "2026.06.26-chat-push1";
 const REMINDER_KEY = "bible-checkin-reminded-v1";
 const BEIJING_TZ = "Asia/Shanghai";
 const REMINDER_HOUR = 21;
@@ -278,7 +278,14 @@ async function requestPushNotifications() {
       .from("push_subscriptions")
       .upsert(subscriptionToRecord(subscription), { onConflict: "user_id,endpoint" });
     if (error) return toast(`推送订阅保存失败：${error.message}`);
-    toast("后台推送提醒已开启，订阅已保存");
+
+    const { count, error: countError } = await supabaseClient
+      .from("push_subscriptions")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", currentUser.id)
+      .eq("enabled", true);
+    if (countError) return toast(`订阅已生成，保存检查失败：${countError.message}`);
+    toast(`后台推送提醒已开启，数据库订阅 ${count || 0} 个`);
   } catch (error) {
     toast(`后台推送开启失败：${error.message || "请换浏览器再试"}`);
   }
@@ -323,6 +330,57 @@ async function sendTestPushNotification() {
   } catch (error) {
     toast(`测试推送失败：${error.message || "请确认 Edge Function 已部署"}`);
   }
+}
+
+async function sendChatPushNotification(messageId) {
+  if (!messageId) return;
+  try {
+    await supabaseClient.functions.invoke("send-chat-push", {
+      body: { message_id: messageId }
+    });
+  } catch {
+    // Chat sending should not fail just because background push delivery failed.
+  }
+}
+
+async function checkPushStatus() {
+  const support = supportPushNotifications();
+  const permission = "Notification" in window ? Notification.permission : "unsupported";
+  let swReady = false;
+  let hasSubscription = false;
+  let savedCount = null;
+  let errorText = "";
+
+  try {
+    if (support) {
+      const registration = await navigator.serviceWorker.ready;
+      swReady = Boolean(registration?.active);
+      const subscription = await registration.pushManager.getSubscription();
+      hasSubscription = Boolean(subscription);
+    }
+
+    if (currentUser) {
+      const { count, error } = await supabaseClient
+        .from("push_subscriptions")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", currentUser.id)
+        .eq("enabled", true);
+      if (error) errorText = error.message;
+      else savedCount = count || 0;
+    }
+  } catch (error) {
+    errorText = error.message || "检查失败";
+  }
+
+  const parts = [
+    support ? "浏览器支持" : "浏览器不支持",
+    `权限：${permission}`,
+    swReady ? "后台脚本正常" : "后台脚本未就绪",
+    hasSubscription ? "本机已订阅" : "本机未订阅",
+    savedCount === null ? "数据库未检查" : `数据库 ${savedCount} 个`
+  ];
+  if (errorText) parts.push(`错误：${errorText}`);
+  toast(parts.join("，"));
 }
 
 function isMentionForUser(text, user) {
@@ -1198,6 +1256,7 @@ async function sendChatMessage(event) {
   }
   document.querySelector(`[data-message-id="${CSS.escape(localId)}"]`)?.remove();
   if (data && currentView === "chat") await appendLiveMessage(data);
+  if (data?.id) sendChatPushNotification(data.id);
 }
 
 function sendImageMessage(event) {
@@ -1254,6 +1313,7 @@ async function uploadChatImage(file) {
     if (input) input.value = "";
     if (data) data.image_data = imageUrl;
     if (data && currentView === "chat") await appendLiveMessage(data);
+    if (data?.id) sendChatPushNotification(data.id);
   } catch (error) {
     toast(`图片处理失败：${error.message || "请换一张图片试试"}`);
   } finally {
@@ -1319,6 +1379,7 @@ function renderMine(user) {
 
         <button class="${notificationOn ? "primary" : "secondary"}" id="enableNotifications">${notificationOn ? "系统提醒已开启" : "开启系统提醒"}</button>
         <button class="secondary" id="enablePush">开启后台推送提醒</button>
+        <button class="secondary" id="checkPushStatus">检查推送状态</button>
         <button class="secondary" id="testPush">发送测试推送</button>
         <button class="text-button" id="disablePush">关闭后台推送提醒</button>
 
@@ -1330,6 +1391,7 @@ function renderMine(user) {
   document.querySelector("#saveName").addEventListener("click", saveName);
   document.querySelector("#enableNotifications").addEventListener("click", requestNotificationAccess);
   document.querySelector("#enablePush").addEventListener("click", requestPushNotifications);
+  document.querySelector("#checkPushStatus").addEventListener("click", checkPushStatus);
   document.querySelector("#testPush").addEventListener("click", sendTestPushNotification);
   document.querySelector("#disablePush").addEventListener("click", disablePushNotifications);
   document.querySelector("#logout").addEventListener("click", logout);
