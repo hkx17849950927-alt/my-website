@@ -300,6 +300,27 @@ select {
   border-radius: 24px;
 }
 
+.chat-action::before {
+  content: "";
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(255, 255, 255, 0.88);
+  border-radius: 999px;
+  background: #d93c3c;
+  box-shadow: 0 3px 8px rgba(98, 24, 24, 0.22);
+  opacity: 0;
+  transform: scale(0.65);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.chat-action.has-unread::before {
+  opacity: 1;
+  transform: scale(1);
+}
+
 .nav {
   display: grid;
   grid-template-columns: 52px 1fr 52px;

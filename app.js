@@ -1,4 +1,4 @@
-const APP_VERSION = "2026.06.26-push1";
+const APP_VERSION = "2026.06.26-push-debug1";
 const REMINDER_KEY = "bible-checkin-reminded-v1";
 const BEIJING_TZ = "Asia/Shanghai";
 const REMINDER_HOUR = 21;
@@ -9,6 +9,7 @@ const PUSH_PUBLIC_KEY = "BFG5J_XNlkijsOExggjOj2XmXyJoQCjdZC9sw3oJqrlFleT5GyUoWnk
 const PROFILE_CACHE_KEY = "bible-checkin-profile-cache-v1";
 const CHECKIN_CACHE_KEY = "bible-checkin-checkin-cache-v1";
 const CHAT_CACHE_KEY = "bible-checkin-chat-cache-v1";
+const CHAT_SEEN_KEY = "bible-checkin-chat-seen-v1";
 const MIN_LOADING_MS = 5000;
 const VERSION_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 
@@ -141,6 +142,7 @@ function clearAppCache() {
   localStorage.removeItem(PROFILE_CACHE_KEY);
   localStorage.removeItem(CHECKIN_CACHE_KEY);
   localStorage.removeItem(CHAT_CACHE_KEY);
+  localStorage.removeItem(CHAT_SEEN_KEY);
 }
 
 function cacheProfile(profile) {
@@ -175,8 +177,44 @@ function cacheChatMessages(messages) {
   writeCache(CHAT_CACHE_KEY, (messages || []).slice(-30));
 }
 
+function latestChatCreatedAt(messages, userId, excludeOwn = false) {
+  return (messages || [])
+    .filter((message) => message.created_at && (!excludeOwn || message.user_id !== userId))
+    .map((message) => message.created_at)
+    .sort()
+    .at(-1) || "";
+}
+
+function getChatSeenAt(userId) {
+  return readCache(CHAT_SEEN_KEY, {})[userId] || "";
+}
+
+function setChatSeenAt(userId, createdAt) {
+  if (!userId || !createdAt) return;
+  const cache = readCache(CHAT_SEEN_KEY, {});
+  if (!cache[userId] || createdAt > cache[userId]) {
+    cache[userId] = createdAt;
+    writeCache(CHAT_SEEN_KEY, cache);
+  }
+}
+
+function hasUnreadChat(userId) {
+  const latestOtherMessage = latestChatCreatedAt(getCachedChatMessages(), userId, true);
+  return Boolean(latestOtherMessage && latestOtherMessage > getChatSeenAt(userId));
+}
+
+function updateChatUnreadIndicator(unread) {
+  const button = document.querySelector("#chat");
+  if (!button) return;
+  button.classList.toggle("has-unread", Boolean(unread));
+}
+
+function notificationPermissionGranted() {
+  return "Notification" in window && Notification.permission === "granted";
+}
+
 function notifyUser(title, body) {
-  if ("Notification" in window && Notification.permission === "granted") {
+  if (notificationPermissionGranted()) {
     new Notification(title, { body, icon: "./assets/app-icon.png" });
   }
   toast(body);
@@ -184,9 +222,14 @@ function notifyUser(title, body) {
 
 async function requestNotificationAccess() {
   if (!("Notification" in window)) return toast("当前浏览器不支持系统通知");
-  if (Notification.permission === "granted") return toast("系统提醒已开启");
+  if (Notification.permission === "granted") {
+    toast("系统提醒已开启");
+    renderMine(currentUser);
+    return;
+  }
   const permission = await Notification.requestPermission();
   toast(permission === "granted" ? "系统提醒已开启" : "系统提醒未开启");
+  renderMine(currentUser);
 }
 
 function supportPushNotifications() {
@@ -235,7 +278,7 @@ async function requestPushNotifications() {
       .from("push_subscriptions")
       .upsert(subscriptionToRecord(subscription), { onConflict: "user_id,endpoint" });
     if (error) return toast(`推送订阅保存失败：${error.message}`);
-    toast("后台推送提醒已开启");
+    toast("后台推送提醒已开启，订阅已保存");
   } catch (error) {
     toast(`后台推送开启失败：${error.message || "请换浏览器再试"}`);
   }
@@ -265,7 +308,7 @@ async function sendTestPushNotification() {
   if (!PUSH_PUBLIC_KEY) return toast("后台推送密钥还没配置");
 
   try {
-    const { error } = await supabaseClient.functions.invoke("send-test-push", {
+    const { data, error } = await supabaseClient.functions.invoke("send-test-push", {
       body: {
         title: "读经打卡测试提醒",
         body: "如果你看到了这条通知，后台推送已经连通。",
@@ -273,7 +316,10 @@ async function sendTestPushNotification() {
       }
     });
     if (error) return toast(`测试推送失败：${error.message}`);
-    toast("测试推送已发送");
+    const total = Number(data?.total || 0);
+    const sent = Number(data?.sent || 0);
+    if (total === 0) return toast("没有找到推送订阅，请先点开启后台推送提醒");
+    toast(sent > 0 ? `测试推送已发送：${sent}/${total}` : `测试推送未送达：0/${total}`);
   } catch (error) {
     toast(`测试推送失败：${error.message || "请确认 Edge Function 已部署"}`);
   }
@@ -660,6 +706,7 @@ function renderHome(user) {
   currentView = "home";
   const { date } = beijingParts();
   const checked = isCachedChecked(user.id, date);
+  const chatUnread = hasUnreadChat(user.id);
   app.innerHTML = html`
     <section class="screen">
       <header class="home-head">
@@ -675,7 +722,7 @@ function renderHome(user) {
         <button class="primary" id="checkin">${checked ? "今日已打卡" : "今日打卡"}</button>
         <button class="primary" id="ranking">排行榜</button>
         <button class="primary" id="members">马拉松成员</button>
-        <button class="primary" id="chat">马拉松群聊</button>
+        <button class="primary chat-action ${chatUnread ? "has-unread" : ""}" id="chat">马拉松群聊</button>
       </div>
     </section>
   `;
@@ -685,6 +732,19 @@ function renderHome(user) {
   document.querySelector("#chat").addEventListener("click", () => renderChat());
   document.querySelector("#checkin").addEventListener("click", () => checkin(user.id));
   syncTodayCheckinState(user.id, date);
+  syncChatUnreadState(user.id);
+}
+
+async function syncChatUnreadState(userId) {
+  const { data, error } = await supabaseClient
+    .from("chat_messages")
+    .select("created_at")
+    .neq("user_id", userId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error || currentView !== "home" || currentUser?.id !== userId) return;
+  updateChatUnreadIndicator(Boolean(data?.created_at && data.created_at > getChatSeenAt(userId)));
 }
 
 async function hasCheckedOnDate(userId, date) {
@@ -885,6 +945,7 @@ async function refreshChatFromServer() {
 
 function renderChatShell(visibleMessages, profileMap) {
   lastChatCreatedAt = visibleMessages.at(-1)?.created_at || new Date().toISOString();
+  setChatSeenAt(currentUser.id, latestChatCreatedAt(visibleMessages, currentUser.id));
   const muteText = currentUser.chat_muted ? "免打扰：开" : "免打扰：关";
 
   app.innerHTML = html`
@@ -984,6 +1045,9 @@ async function appendLiveMessage(message) {
   bindChatImagePreview();
   if (!lastChatCreatedAt || message.created_at > lastChatCreatedAt) {
     lastChatCreatedAt = message.created_at;
+  }
+  if (currentView === "chat") {
+    setChatSeenAt(currentUser.id, message.created_at);
   }
   scrollChatBottom();
 }
@@ -1226,6 +1290,7 @@ function compressImage(file) {
 function renderMine(user) {
   currentView = "mine";
   closeChatRealtime();
+  const notificationOn = notificationPermissionGranted();
   app.innerHTML = html`
     <section class="screen">
       ${nav("我的")}
@@ -1239,7 +1304,7 @@ function renderMine(user) {
         </label>
         <button class="primary" id="saveName">保存名称</button>
 
-        <button class="secondary" id="enableNotifications">开启系统提醒</button>
+        <button class="${notificationOn ? "primary" : "secondary"}" id="enableNotifications">${notificationOn ? "系统提醒已开启" : "开启系统提醒"}</button>
         <button class="secondary" id="enablePush">开启后台推送提醒</button>
         <button class="secondary" id="testPush">发送测试推送</button>
         <button class="text-button" id="disablePush">关闭后台推送提醒</button>
